@@ -160,6 +160,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the profile key `gpu_ts_hz` (default `614400000`, which leaves every game as it was) sets the tick rate of the reports (`nvn_timestamp.h`; `nvn_ts_profile_hz` is defined in `nvn_mtl.m` from the profile); `nvnDeviceGetTimestampInNanoseconds` converts at the same rate. `DM_NVN_TS_HZ=<Hz>` overrides the key for a test. A game that converts its reports at NVN's rate keeps the default.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Switch 2, v131072): after the key, a falling leaf moves 5 to 8 px a frame at 2048 px wide (before, about 20 times that).
 - **Check:** `t_timestamp` checks the default vectors as before.
+### A feedback time read in its own clock tick counted as in the future
+
+- **Symptom:** `t_counter_clock`'s check "feedback conversion uses the resumed guest epoch" failed in about one run of six (`gpu_s_guest_ns` returned 0, unknown). In a game, a counter report whose completion handler reads the clock in the same tick as the command buffer's `GPUStartTime` or `GPUEndTime` fell back as if that GPU time were unknown (GitHub issue #1896).
+- **Cause:** `gpu_s_guest_ns` (`nvn_mtl.m`) took the age of a feedback time as `(double)now - s * 1e9`. clang contracts that line into a fused multiply-subtract, so the product `s * 1e9` is not rounded to a double, and for about half of all times its exact value lies a fraction of a nanosecond above the integer `now` of the same clock tick (mach time steps 41.67 ns at 24 MHz). The age came out just below 0 and the time was rejected as in the future.
+- **Fix:** the age is taken in integer nanoseconds: the time rounded to a nanosecond, allowed to lie ahead of `now` by what the double's resolution at that uptime can add (about 0.5 ns a month) plus the rounding; such a time is the read's own. NaN, infinity and negative times stay unknown.
+- **Check:** `t_counter_clock` converts 20,000 times read just before the call, none of which may come out unknown (failed in every run before, passes in 100 of 100 after, on an M4 up for 33 hours), and a time one double step ahead of the read, which must be the read's time.
+- **Found on:** the unit test, on an M5 Max (3 of 20 runs) and an M4 (6 of 40); no game report.
 
 ### The Switch 2's system tick is 31.25 MHz
 
