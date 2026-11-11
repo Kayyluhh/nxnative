@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
-# arithmetic (precise), 64-bit products (mul_extended), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store,
+# arithmetic (precise), 64-bit products (mul_extended), float adds to storage memory as native atomics (float_add_msl), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store,
 # shared_store_msl), threadgroup memory past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for
 # (border_emu) and a pixel shader's depth snapped to its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import
 # them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
@@ -23,6 +23,18 @@ def mul_extended(msl):
     scalar = ''.join(f'template<typename T, typename U> static inline __attribute__((always_inline)) T spvMulExtended({t} l, {t} r) {{ {w} p = {w}(l) * {w}(r); return T{{U(p), U(p >> 32)}}; }}\n'
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
+
+# A float add to storage memory with no result read (RED.F32, InstEmitMemory EmitAtomicAddF32) reaches the MSL as a compare-and-swap loop on the word: MSL 2.3 has no float atomics.
+# Metal has had atomic_float on device memory since MSL 3.0, and the compile takes the default language version. agl's scene analysis adds every thread's luminance into the same
+# few words this way, so its loops retried for each other: Ocarina of Time's 6e28359aa3558f61 (one workgroup of 256 threads, four words) took 0.25 ms a frame and 1bba09ec4bc8ff67
+# 0.40 ms on a MacBook Air M4, under 0.13 ms each as one atomic_fetch_add; the picture's exposure the same. Only the exact loop the translator writes is replaced
+FLOAT_ADD = re.compile(r'(?m)^( *)bool (_\d+);\n\1do\n\1\{\n\1    float (_\d+) = as_type<float>\((?P<addr>[^\n]*?)\);\n\1    float (_\d+) = \3 \+ (?P<val>[^;\n]+);\n'
+                       r'\1    uint (_\d+) = as_type<uint>\(\3\);\n\1    uint (_\d+);\n\1    do\n\1    \{\n\1        \8 = \7;\n'
+                       r'\1    \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<addr2>[^\n]*?), &\8, as_type<uint>\(\5\), memory_order_relaxed, memory_order_relaxed\) && \8 == \7\);\n'
+                       r'\1    uint (_\d+) = \8;\n\1    \2 = int\(\10\) != as_type<int>\(\3\);\n\1\} while \(\2\);\n')
+def float_add_msl(msl):
+    return FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
+                         f"{m.group(1)}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val')}, memory_order_relaxed);\n", msl)
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
