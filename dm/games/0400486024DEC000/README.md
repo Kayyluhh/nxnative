@@ -9,7 +9,6 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `mem_reserve 0x320000000`, `mem_alias 0x100000000`, `mem_stack 0x10000000`, `app_pool 0x240000000` | [`game.tsv`](game.tsv) | the game asks `SetHeapSize` for 0x18ce00000; the rest as Donkey Kong Bananza, the Switch 2's 9 GB |
 | `mem_map_limit on` | [`game.tsv`](game.tsv) | a map past the application pool fails with ResultLimitReached, as on Horizon. The SDK's allocator keeps freed pages mapped until a map fails, then gives them back ([PR 1444](https://github.com/seedds/nxnative/pull/1444) reports a black screen leaving the Deku Tree without it; not reached here) |
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
-| `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
 | Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)) |
 | `gpu_ts_hz 31250000` | `game.tsv` | the game turns the difference of two raw counter reports into its wind and particle time step at the Switch 2's system counter rate: at NVN's 614.4 MHz its foliage, falling leaves and hanging plants moved 19.66 times too fast ([why](../../../docs/reference/frame-rate.md#a-game-that-reads-raw-timestamp-reports-at-another-rate)) |
 | `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution. From 7f50222 until the fix in [Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory) it had no effect, since the dynamic resolution's family heaps turned it off; with the fix, M1 Max gameplay GPU 22.2 → 20.3 ms; no change on an M2 Air or an M4 Pro |
@@ -18,6 +17,8 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
 | `pad_layout full` | `game.tsv` | a 3D field and both sticks |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding).
 
 ## Files
 
@@ -151,6 +152,8 @@ The prewarm built the 551 specialized bases of that scene in 11 s at the start, 
 Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 ms more (GPU per frame 25.09 and 25.24 ms with their corrections, 24.97 and 24.86 ms without, interleaved runs; their compute encoders 0.3 ms faster in the profiled frames). Chain `da29694f3f98` contains the change for every stage; a full shader conversion with it is pending, and so is the target of at least 55 fps at these settings.
 
 ## Found on this game
+
+- [Regression shader compilations grow the normal build cache](../../../docs/reference/packing.md#regression-shader-compilations-grow-the-normal-build-cache): resolved in cache and harness tests. Its normal build's `cas.db` held 40.8 GB; future regression writes use a separate bounded cache, while the existing mixed cache is preserved.
 
 - [Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory): resolved, `draw_barriers game` was off whenever family heaps existed, and fragment-only barriers forced full ones; M1 Max gameplay frame 23.4 → 21.7 ms.
 - [Single frames over the fit keep a longer hold](../../../docs/reference/frame-rate.md#single-frames-over-the-fit-keep-a-longer-hold): 20 fps for 24.5 s after an area load in windowed play, then 60 again; fixed in the frame step. Open: the castle town market, at the edge of the fit, can still stay at 30 fps after its load.
