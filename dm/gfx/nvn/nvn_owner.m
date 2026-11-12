@@ -19,9 +19,12 @@ static nvn_hmap g_ghost_held = {.klen = sizeof(uintptr_t)};
 // texture object (tex_snap in hle_nvn.c, mtl_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
 // (the HUD captures, the 640x360 half-resolution buffers) and finalizes their objects before it submits. Those serials went back into g_by_serial and stayed there for good, as no second
 // Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
-// so a record replayed again soon still finds its texture
+// so a record replayed again soon still finds its texture. An entry resolved in the last GHOST_IDLE frames stays, past NGHOST if need be (frames, not submissions: Ocarina of Time
+// makes about 25 submissions a frame): while that game streams an area in, its registered IDs name thousands of finalized textures at once, and with 512 slots each pool walk
+// evicted what the next one resolved (3.7 million puts in 300 frames, each with two notes and a release, frames of 100-490 ms on the submit thread). g_ghost_q is every ghost
+// serial once, oldest first; g_ghost_seen the frame each was last put or resolved in (own_hook_frame + 1, so never 0)
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
-static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
+static nvn_hmap g_ghost = {.klen = 8}, g_ghost_seen = {.klen = 8}; static uint64_t *g_ghost_q; static unsigned g_ghost_qcap, g_ghost_qhead, g_ghost_qn; static uint64_t g_ghost_puts;
 // Deferred command descriptors and persistent bindings retain a texture serial independently of the guest descriptor and the bounded recently-finalized cache
 typedef struct { unsigned refs; void *object; } tex_pin;
 static nvn_hmap g_tex_pins = {.klen = 8}, g_tex_pin_objects = {.klen = sizeof(uintptr_t)};
@@ -48,6 +51,26 @@ static void count_add(nvn_hmap *m, const void *o, int d) {
 static void held_add(const void *o, int d) { count_add(&g_by_serial_held, o, d); }
 static void ghost_held_add(const void *o, int d) { count_add(&g_ghost_held, o, d); }
 static void obj_drop(id o) { own_hook_drop(o, tex_object_pinned(o) || own_hook_shared(o)); }   // caller holds g_smu
+static void ghost_seen(uint64_t k) { nvn_hm_put(&g_ghost_seen, &k, (void *)(uintptr_t)(own_hook_frame() + 1)); }   // caller holds g_smu
+static void ghost_push(uint64_t k) {   // caller holds g_smu
+    if (g_ghost_qn == g_ghost_qcap) {
+        unsigned cap = g_ghost_qcap ? g_ghost_qcap * 2 : NGHOST * 2; uint64_t *q = malloc(cap * sizeof *q); if (!q) ODIE("the finalized textures' queue: allocation failed");
+        for (unsigned i = 0; i < g_ghost_qn; i++) q[i] = g_ghost_q[(g_ghost_qhead + i) % g_ghost_qcap];
+        free(g_ghost_q); g_ghost_q = q; g_ghost_qcap = cap; g_ghost_qhead = 0;
+    }
+    g_ghost_q[(g_ghost_qhead + g_ghost_qn++) % g_ghost_qcap] = k;
+}
+// Past NGHOST, the oldest serials go unless resolved in the last GHOST_IDLE frames (those go to the back of the queue); at most scan of them looked at. Caller holds g_smu
+static void ghost_trim(unsigned scan) {
+    while (g_ghost_qn > NGHOST && scan--) {
+        uint64_t s = g_ghost_q[g_ghost_qhead]; g_ghost_qhead = (g_ghost_qhead + 1) % g_ghost_qcap; g_ghost_qn--;
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_ghost_seen, &s);
+        if (seen && own_hook_frame() + 1 - seen < GHOST_IDLE) { ghost_push(s); continue; }
+        id ev = hm_get_id(&g_ghost, &s); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); }
+        hm_del_id(&g_ghost, &s); nvn_hm_del(&g_ghost_seen, &s); own_hook_changed(s);   // the evicted serial resolves anew too
+    }
+}
+void own_ghost_trim_idle(void) { pthread_mutex_lock(&g_smu); ghost_trim(64); pthread_mutex_unlock(&g_smu); }
 
 const void *own_live_ref_locked(uint64_t k) { return nvn_hm_get(&g_by_serial, &k); }
 const void *own_live_ref(uint64_t k) { pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
@@ -96,7 +119,7 @@ void mtl_tex_unpin(uint64_t serial) {
     pthread_mutex_unlock(&g_smu);
 }
 const void *own_resolve_ref(uint64_t k) {
-    pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); if (!o && g_ghost.n) o = nvn_hm_get(&g_ghost, &k); if (!o) { tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) o = pin->object; } pthread_mutex_unlock(&g_smu); return o;
+    pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); if (!o && g_ghost.n && (o = nvn_hm_get(&g_ghost, &k))) ghost_seen(k); if (!o) { tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) o = pin->object; } pthread_mutex_unlock(&g_smu); return o;
 }
 void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     pthread_mutex_lock(&g_smu);
@@ -104,13 +127,10 @@ void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures
     id old = hm_get_id(m, &k);
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) obj_drop(old);
-    else if (m == &g_ghost) {
-        uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); own_hook_changed(*slot); }   // the evicted serial resolves anew too
-        *slot = k; g_ghost_puts++;
-    }
+    else if (m == &g_ghost) { ghost_push(k); g_ghost_puts++; }
     hm_put_id(m, &k, o); tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) tex_pin_set(pin, o); own_hook_changed(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
+    if (m == &g_ghost) { ghost_seen(k); ghost_trim(8); }
     pthread_mutex_unlock(&g_smu);
 }
 
@@ -174,7 +194,7 @@ int own_check_locked(char *why, size_t n) {
     for (uint32_t i = 0; i < g_tex_pins.cap; i++) { tex_pin *pin = g_tex_pins.vals[i]; if (pin && pin->object) expect_one(live, (__bridge id)pin->object); }
     for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) expect_one(ghost, (__bridge id)g_ghost.vals[i]);
     int ok = counts_match("live", live, &g_by_serial_held, why, n) && counts_match("ghost", ghost, &g_ghost_held, why, n);
-    if (ok && g_ghost.n > NGHOST) { snprintf(why, n, "%u ghost serials, more than the ring's %d", g_ghost.n, NGHOST); ok = 0; }
+    if (ok && g_ghost.n != g_ghost_qn) { snprintf(why, n, "%u ghost serials, %u in their queue", g_ghost.n, g_ghost_qn); ok = 0; }
     CFRelease(live); CFRelease(ghost);
     return ok;
 }

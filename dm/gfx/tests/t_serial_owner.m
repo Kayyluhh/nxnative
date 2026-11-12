@@ -1,7 +1,7 @@
-// The serial tables' owner (nvn_owner.m) on its own: linked without the replay layer, whose four hooks are recorded here instead (what is dropped and whether it stays resident,
-// what the sharing table holds, which object's last count went, which serial changed). What it holds to, as the tables behaved before they moved out of nvn_mtl.m:
+// The serial tables' owner (nvn_owner.m) on its own: linked without the replay layer, whose five hooks are recorded here instead (what is dropped and whether it stays resident,
+// what the sharing table holds, which object's last count went, which serial changed, the frame). What it holds to, as the tables behaved before they moved out of nvn_mtl.m:
 // a live serial's registration, replacement and removal; where tex_put sends a serial (live table for a live texture object or an external texture from 2^62 up, ghost ring for a
-// finalized one); a finalize, and a copy's finalize that ends nothing; ghost replacement in place and eviction at NGHOST; texture pins and program pins; a view's entry counting its
+// finalized one); a finalize, and a copy's finalize that ends nothing; ghost replacement in place, eviction past NGHOST of serials idle GHOST_IDLE frames and none of those in use; texture pins and program pins; a view's entry counting its
 // parent; renaming an object everywhere; and after every step the held counts against the tables (own_check_locked). The owner releases nothing itself: everything it lets go goes
 // to own_hook_drop, which nvn_mtl.m releases once the submission in flight completes, so what a lookup returned outlives the change that dropped it.
 // DM_TEST_SERIAL_TWIN=1 asserts what serial_del should do for a finalized texture serial, which it does not yet (the twin path of tex_mtl_: tex_put sends a finalized serial's view to
@@ -23,6 +23,8 @@ void own_hook_drop(id o, int keep_resident) { [g_dropped addObject:o]; [g_droppe
 int own_hook_shared(id o) { return [g_shared containsObject:o]; }
 void own_hook_unheld(const void *o) { [g_unheld addObject:[NSValue valueWithPointer:o]]; }
 void own_hook_changed(uint64_t serial) { g_changed_last = serial; g_changed_n++; }
+static uint64_t g_frame;
+uint64_t own_hook_frame(void) { return g_frame; }
 static int dropped(id o, int keep) { for (NSUInteger i = 0; i < g_dropped.count; i++) if (g_dropped[i] == o && g_dropped_keep[i].intValue == keep) return 1; return 0; }
 static int unheld(id o) { for (NSValue *v in g_unheld) if (v.pointerValue == (__bridge void *)o) return 1; return 0; }
 
@@ -105,15 +107,34 @@ int main(void) { @autoreleasepool {
         serial_del(ext);
     }
 
-    {   // the ghost ring: the oldest serial goes when NGHOST newer ones have come
+    {   // the ghost table: past NGHOST the oldest serial goes once it has not been resolved for GHOST_IDLE frames
         enum { BASE = 940000 };
         NSMutableArray *objs = [NSMutableArray array];
-        for (int i = 0; i <= NGHOST; i++) { id o = [NSObject new]; [objs addObject:o]; tex_put(BASE + (uint64_t)i, o); }
-        CHECK(!ghost(BASE) && !tex_get(BASE) && !holds(objs[0]) && dropped(objs[0], 0), "the oldest ghost serial is evicted by the NGHOST + 1st: dropped, no longer held");
-        CHECK(ghost(BASE + 1) && tex_get(BASE + NGHOST) == objs[NGHOST], "the newer ones stay");
+        for (int i = 0; i < NGHOST; i++) { id o = [NSObject new]; [objs addObject:o]; tex_put(BASE + (uint64_t)i, o); }
+        CHECK(ghost(BASE) && holds(objs[0]), "serials put this frame stay past NGHOST (with the two above, NGHOST + 2)");
+        g_frame += GHOST_IDLE;
+        id o = [NSObject new]; [objs addObject:o]; tex_put(BASE + NGHOST, o);
+        // (the order is not the puts' any more: a trim sends a serial still in use to the back of the queue)
         pthread_mutex_lock(&g_smu); own_stats st = own_stats_locked(); pthread_mutex_unlock(&g_smu);
-        CHECK(st.ghost <= NGHOST, "the ring holds at most NGHOST serials");
+        int gone = 0, gone_ok = 1; for (int i = 0; i < NGHOST; i++) if (!ghost(BASE + (uint64_t)i)) { gone++; gone_ok &= !tex_get(BASE + (uint64_t)i) && !holds(objs[i]) && dropped(objs[i], 0); }
+        CHECK(st.ghost == NGHOST && tex_get(BASE + NGHOST) == objs[NGHOST], "with the others idle the next put brings the table back to NGHOST serials, and it stays");
+        CHECK(gone >= 1 && gone_ok, "an evicted idle serial resolves to nothing, is dropped and no longer held");
         step("ghost eviction");
+    }
+    {   // more finalized serials than NGHOST resolved every frame (Ocarina of Time streaming an area in): none goes while in use, and the table shrinks once they idle
+        enum { N = 4 * NGHOST }; const uint64_t base = 950000;
+        for (uint64_t i = 0; i < N; i++) tex_put(base + i, [NSObject new]);
+        pthread_mutex_lock(&g_smu); uint64_t puts = own_stats_locked().ghost_puts; pthread_mutex_unlock(&g_smu);
+        int found = 0;
+        for (int f = 0; f < 2 * GHOST_IDLE; f++) { g_frame++; own_ghost_trim_idle(); for (uint64_t i = 0; i < N; i++) found += tex_get(base + i) != nil; }
+        pthread_mutex_lock(&g_smu); uint64_t puts2 = own_stats_locked().ghost_puts; pthread_mutex_unlock(&g_smu);
+        CHECK(found == N * 2 * GHOST_IDLE && puts2 == puts, "finalized serials resolved every frame stay past NGHOST, with no new puts");
+        step("ghost serials in use");
+        g_frame += GHOST_IDLE;
+        for (int i = 0; i < N; i++) own_ghost_trim_idle();
+        pthread_mutex_lock(&g_smu); own_stats st = own_stats_locked(); pthread_mutex_unlock(&g_smu);
+        CHECK(st.ghost <= NGHOST && !tex_get(base), "idle, they go until the table is back at NGHOST");
+        step("ghost serials idle");
     }
 
     {   // texture pins

@@ -3,7 +3,7 @@
 //
 // Tables (all under g_smu but the program pins):
 //   live    serial → object (MTLTexture, NvPkg, NvProg) of a live serial: serial_put / serial_del, and tex_put for a texture whose object is live or an external texture (2^62 and up)
-//   ghost   serial → object of a finalized texture serial a replayed record still resolves (tex_put), a ring of NGHOST: the oldest goes when a new serial comes
+//   ghost   serial → object of a finalized texture serial a replayed record still resolves (tex_put): past NGHOST the oldest goes, unless resolved in the last GHOST_IDLE frames
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
 //   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
@@ -37,7 +37,7 @@ static inline void hm_put_id(nvn_hmap *m, const void *k, id o) {   // the map ow
 static inline void hm_del_id(nvn_hmap *m, const void *k) { void *old = nvn_hm_del(m, k); if (old) CFRelease(old); }
 
 extern pthread_mutex_t g_smu;
-enum { NGHOST = 512 };
+enum { NGHOST = 512, GHOST_IDLE = 16 };
 
 // Lookups (borrowed, see above)
 const void *own_live_ref(uint64_t k);       // the live entry
@@ -49,7 +49,8 @@ static inline id tex_get(uint64_t k) { return (__bridge id)own_resolve_ref(k); }
 // Changes (each takes g_smu)
 void serial_put(uint64_t k, id o);   // a live serial's object; the one it replaces is dropped
 void serial_del(uint64_t k);         // a live serial's entry goes; a ghost entry of the serial is left (see docs/reference/nvn-objects.md, A finalized twin view left in the ghost ring)
-void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost ring
+void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost table
+void own_ghost_trim_idle(void);      // ghost serials past NGHOST that idled GHOST_IDLE frames go, a bounded number a call (each submission's commit)
 
 // Live texture objects. Caller holds g_smu
 void own_tex_live_put_locked(const tex_t *t);   // mtl_tex_init
@@ -79,3 +80,4 @@ void own_hook_drop(id o, int keep_resident);   // an object the owner lets go: r
 int own_hook_shared(id o);                     // whether the sharing table holds it
 void own_hook_unheld(const void *o);           // its last count in a table went (a retired object waiting for its holders resumes)
 void own_hook_changed(uint64_t serial);        // a serial's object changed (0: no one serial)
+uint64_t own_hook_frame(void);                 // the frame being made (g_cur_frame), for how recently a ghost serial was resolved
