@@ -75,7 +75,8 @@ void own_ghost_trim_idle(void) { pthread_mutex_lock(&g_smu); ghost_trim(64); pth
 const void *own_live_ref_locked(uint64_t k) { return nvn_hm_get(&g_by_serial, &k); }
 const void *own_live_ref(uint64_t k) { pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); } hm_put_id(&g_by_serial, &k, o); held_add((__bridge void *)o, 1); own_hook_changed(k); pthread_mutex_unlock(&g_smu); }
-void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_by_serial, &k); own_hook_changed(k); } pthread_mutex_unlock(&g_smu); }   // nothing to drop: the texture
+static void live_del_locked(uint64_t k) { id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_by_serial, &k); own_hook_changed(k); } }   // nothing to drop: the texture
+void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); live_del_locked(k); pthread_mutex_unlock(&g_smu); }
 
 void own_tex_live_put_locked(const tex_t *t) { nvn_hm_put(&g_tex_live, &t->serial, (void *)t); }
 int own_tex_live_locked(uint64_t serial) { return nvn_hm_get(&g_tex_live, &serial) != NULL; }
@@ -121,8 +122,7 @@ void mtl_tex_unpin(uint64_t serial) {
 const void *own_resolve_ref(uint64_t k) {
     pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); if (!o && g_ghost.n && (o = nvn_hm_get(&g_ghost, &k))) ghost_seen(k); if (!o) { tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) o = pin->object; } pthread_mutex_unlock(&g_smu); return o;
 }
-void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
-    pthread_mutex_lock(&g_smu);
+static void tex_put_locked(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     nvn_hmap *m = k >= (1ull << 62) || nvn_hm_get(&g_tex_live, &k) ? &g_by_serial : &g_ghost;
     id old = hm_get_id(m, &k);
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
@@ -131,7 +131,37 @@ void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures
     hm_put_id(m, &k, o); tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) tex_pin_set(pin, o); own_hook_changed(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
     if (m == &g_ghost) { ghost_seen(k); ghost_trim(8); }
-    pthread_mutex_unlock(&g_smu);
+}
+void tex_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); tex_put_locked(k, o); pthread_mutex_unlock(&g_smu); }
+
+// sRGB / linear views (tex_mtl_'s twin of a shared texture). A view shares its parent's bytes only while the parent is in the sharing table: a parent that left it (evicted with its
+// pool, taken over, upgraded) no longer holds the storage's bytes, and neither does the view. The parent's place there is checked in the same hold of g_smu as the view's entry
+// changes, so no entry names a view whose parent had already gone. Publishing first and taking the entry back with serial_del when the parent turned out gone (as tex_mtl_ did)
+// let another thread resolve the view in between, and for a finalized serial left it in the ghost ring for good: serial_del ends a live entry only, which is what a finalize wants.
+static id view_parent(id o) { return [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil; }
+static int view_kept(id o) { return tex_object_pinned(o) || own_hook_shared(o); }   // nvn_mtl.m's alias_has: a pinned or shared object keeps its view valid
+int own_view_put(uint64_t k, id<MTLTexture> view) {
+    pthread_mutex_lock(&g_smu); id p = view_parent(view); int ok = p && own_hook_shared(p); if (ok) tex_put_locked(k, view); pthread_mutex_unlock(&g_smu); return ok;
+}
+// The serial's place in the queue goes with the entry: left behind, it would count against NGHOST and, once the serial is put again, stand for it twice. Caller holds g_smu
+static void ghost_del_locked(uint64_t k) {
+    id old = hm_get_id(&g_ghost, &k); if (!old) return;
+    for (unsigned i = 0; i < g_ghost_qn; i++) if (g_ghost_q[(g_ghost_qhead + i) % g_ghost_qcap] == k) {   // the ones after it move up one
+        for (unsigned j = i; j + 1 < g_ghost_qn; j++) g_ghost_q[(g_ghost_qhead + j) % g_ghost_qcap] = g_ghost_q[(g_ghost_qhead + j + 1) % g_ghost_qcap];
+        g_ghost_qn--; break;
+    }
+    nvn_hm_del(&g_ghost_seen, &k);
+    ghost_held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_ghost, &k); own_hook_changed(k);
+}
+int own_view_drop_stale(uint64_t k, id view) {
+    pthread_mutex_lock(&g_smu);
+    id p = view_parent(view); int stale = p && !view_kept(view) && !view_kept(p);
+    if (stale) {
+        id live = hm_get_id(&g_by_serial, &k);
+        if (live == view) live_del_locked(k);
+        else if (!live && hm_get_id(&g_ghost, &k) == view) ghost_del_locked(k);   // an entry another thread changed meanwhile is not this view's: it stays
+    }
+    pthread_mutex_unlock(&g_smu); return stale;
 }
 
 int own_rename_locked(id from, id to, uint64_t serial) {
@@ -195,6 +225,15 @@ int own_check_locked(char *why, size_t n) {
     for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) expect_one(ghost, (__bridge id)g_ghost.vals[i]);
     int ok = counts_match("live", live, &g_by_serial_held, why, n) && counts_match("ghost", ghost, &g_ghost_held, why, n);
     if (ok && g_ghost.n != g_ghost_qn) { snprintf(why, n, "%u ghost serials, %u in their queue", g_ghost.n, g_ghost_qn); ok = 0; }
+    // each queue entry names a ghost serial, and none twice: a second place would count against NGHOST for nothing
+    CFMutableSetRef queued = CFSetCreateMutable(NULL, 0, NULL);
+    for (unsigned i = 0; ok && i < g_ghost_qn; i++) {
+        uint64_t s = g_ghost_q[(g_ghost_qhead + i) % g_ghost_qcap];
+        if (!nvn_hm_get(&g_ghost, &s)) { snprintf(why, n, "queue place %u names serial %llu, which has no ghost entry", i, (unsigned long long)s); ok = 0; }
+        else if (CFSetContainsValue(queued, (const void *)(uintptr_t)s)) { snprintf(why, n, "serial %llu is in the queue twice", (unsigned long long)s); ok = 0; }
+        else CFSetAddValue(queued, (const void *)(uintptr_t)s);
+    }
+    CFRelease(queued);
     CFRelease(live); CFRelease(ghost);
     return ok;
 }
