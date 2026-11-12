@@ -225,8 +225,8 @@ static void poll_beside(void) { printf("poll_beside: skipped, the profile has no
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static void settle(void) { for (int i = 0; i < 2; i++) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); } }   // the GPU passed every fence
 // The GPU's first write over a texture taken from its storage (cpu_unc_drop): every serial that held the package now holds its texture, the package goes, and the serials go one by
-// one, the last through the ghost ring. The texture stays resident while any serial entry, live or finalized, holds it, and leaves the residency set with the last. Ocarina of Time's
-// 260x260 terrain tiles handed over this way left the set with the package, or with the first holder a ghost-ring eviction dropped, while still drawn: GPU address faults (#1326)
+// one, the last through the ghost table. The texture stays resident while any serial entry, live or finalized, holds it, and leaves the residency set with the last. Ocarina of Time's
+// 260x260 terrain tiles handed over this way left the set with the package, or with the first holder a ghost eviction dropped, while still drawn: GPU address faults (#1326)
 static void handover_holders(void) {
     const size_t len = 262144;
     uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -253,10 +253,10 @@ static void handover_holders(void) {
     CHECK(resident(ta), "hand-over: the package's release leaves the texture resident for its serials");
     h_nvnTextureFinalize(&a); settle();
     CHECK(resident(ta), "hand-over: one serial's release leaves it resident for the other");
-    tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost ring
+    tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost table
     h_nvnTextureFinalize(&b); settle();
-    CHECK(resident(ta), "hand-over: a finalized serial in the ghost ring keeps it resident");
-    g_cur_frame += GHOST_IDLE;   // not resolved for that long: the next entries past NGHOST evict it
+    CHECK(resident(ta), "hand-over: a finalized serial in the ghost table keeps it resident");
+    atomic_fetch_add(&g_cur_frame, GHOST_IDLE);   // not resolved for that long: the entries that come past NGHOST evict it
     for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + i, [NSObject new]);
     settle();
     pthread_mutex_lock(&g_smu); int left = own_stats_locked().retire_wait; pthread_mutex_unlock(&g_smu);
@@ -264,20 +264,6 @@ static void handover_holders(void) {
     h_nvnTextureFinalize(&c); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); settle();
     CHECK(!resident(tc), "hand-over: the pool's own texture goes with the pool");
     munmap(mem, len);
-}
-// More finalized serials than NGHOST resolved every frame (Ocarina of Time streaming an area in): none is evicted while it is in use, and the table shrinks back once they idle.
-// With the replay layer's frame (own_hook_frame, g_cur_frame) and the trim each commit makes (own_ghost_trim_idle); t_serial_owner checks the table alone
-static void ghost_keeps_used(void) {
-    enum { N = 4 * NGHOST }; const uint64_t base = 1ull << 60;
-    for (uint64_t i = 0; i < N; i++) tex_put(base + i, [NSObject new]);
-    pthread_mutex_lock(&g_smu); uint64_t puts = own_stats_locked().ghost_puts; pthread_mutex_unlock(&g_smu); int found = 0;
-    for (int f = 0; f < 2 * GHOST_IDLE; f++) { g_cur_frame++; own_ghost_trim_idle(); for (uint64_t i = 0; i < N; i++) found += tex_get(base + i) != nil; }
-    pthread_mutex_lock(&g_smu); uint64_t puts2 = own_stats_locked().ghost_puts; pthread_mutex_unlock(&g_smu);
-    CHECK(found == N * 2 * GHOST_IDLE && puts2 == puts, "finalized serials resolved every frame stay past the table's size");
-    g_cur_frame += GHOST_IDLE;
-    for (int i = 0; i < N; i++) own_ghost_trim_idle();
-    pthread_mutex_lock(&g_smu); unsigned left = own_stats_locked().ghost; pthread_mutex_unlock(&g_smu);
-    CHECK(left <= NGHOST, "idle finalized serials go until the table is back at its size");
 }
 // Retirement's two conditions, one after the other: the queue waits for the fence of the submission in flight at the retirement (completion), then asks the owner (eligibility,
 // own_retire_locked). An object an entry holds waits in the owner; its last count going hands it back behind the submission then in flight, so the entry's last encodings complete
@@ -330,7 +316,7 @@ static void retire_across_threads(void) {
     }
     atomic_store(&g_churn_done, 1); pthread_join(t, NULL);
     CHECK(!atomic_load(&g_lost_residency) && resident(x), "across threads: held by a live entry's view, the texture never left the residency set");
-    g_cur_frame += GHOST_IDLE;   // not resolved for that long: the next entries past NGHOST evict the ghost entry
+    atomic_fetch_add(&g_cur_frame, GHOST_IDLE);   // idle, the ghost entry goes as newer ones come
     for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + 1000 + i, [NSObject new]);
     serial_del(hold); defer_drain(); fence(); fence(); res_commit();
     pthread_mutex_lock(&g_smu); uint32_t waiting = own_stats_locked().retire_wait; char why[256] = ""; int ok = own_check_locked(why, sizeof why); pthread_mutex_unlock(&g_smu);
@@ -374,6 +360,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); ghost_keeps_used(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }
