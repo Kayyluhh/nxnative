@@ -790,6 +790,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `hle_nvn.c` accepts the three calls and records nothing. Shading every pixel is the most any rate asks for, so the picture is the same or sharper, and the only cost is GPU time where the game meant to save it. This drops a feature rather than emulating it, and the choice is a platform limit.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), every frame; [Splatoon Raiders](../../dm/games/0400380020056000/README.md), the palette.
 
+### Screenshots of a cropped window held what lay outside the crop
+
+- **Symptom:** `regress.py` flagged Bastion as a REGRESSION on a screenshot (RGB difference about 30) whose game picture was the same on both sides: a strip beside the picture was black in some runs and purple (68, 34, 136) in others, on the baseline as well as the candidate.
+- **Cause:** a screenshot (`DM_NVN_SHOT`, `DM_CTL shot`) saved the window texture whole, 1920x1080, while the game crops what it presents to 1600x900 (`nvnWindowSetCrop`, `[nvn] WindowCrop 0,0 1600x900`). Outside the crop the texture is never presented and holds whatever it held before, which differs from run to run.
+- **Fix:** a screenshot of a window the game crops is the picture as presented: the present pass draws the crop at the window texture's own size (as `DM_NVN_SHOT_OUT` draws it at a size of its own), so its size stays the same when a dynamic resolution moves the crop. An uncropped window is still saved as its texture's own pixels. Until a regression baseline includes this, a check of a cropping game against an older revision compares two kinds of shot.
+- **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md), in regression checks of the review's steps (step 15's audit).
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil
@@ -1561,6 +1568,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** `vkUpdateDescriptorSets` copied each descriptor whole (`*t = *s`), so a copy replaced the sampler state the set's allocation had put in place from the layout. Vulkan's updates, copies as well as writes, change only the image of a combined image sampler whose binding has immutable samplers, and a sampler-only copy into such a binding is not allowed. The write path (`desc_write`) already kept the sampler.
 - **Fix:** copies go through `desc_copy` in `dm/gfx/vk/hle_vk.m`: the source descriptor whole, but the destination's sampler stays when its binding has immutable samplers (`lbind.imm`). A source's immutable sampler is part of its descriptor and is copied into a binding without them. `dm/gfx/tests/t_vk_desc.m` checks both directions.
 - **Found on:** no game: a report reproduced it in `t_vk_desc.m` (source sampler A, destination immutable sampler B; after the copy the destination held A).
+- **Check:** `t_vk_desc` also copies three elements of an array binding, from element 1, into the last element of an immutable binding and on into the next, mutable binding (consecutive bindings): the immutable element keeps its sampler, the others take the source's image and sampler, and the element not copied into is untouched.
 
 ### An unwritten secondary blend source
 
@@ -1785,6 +1793,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cause:** `glDeleteShader` freed the shader at once and its name went to the next `glCreateShader`, while a program keeps its shaders by name: a link then found no shader, or another one (a fragment shader as the vertex stage). In GL a shader deleted while attached is only flagged (`GL_DELETE_STATUS` 1), keeps its name, and goes when its last program detaches it or is deleted. Likewise `glDeleteProgram` freed the current program and made none current, where GL keeps it in use until another `glUseProgram`. `glDetachShader` was not implemented.
 - **Fix:** `dm/gfx/gl/hle_gl.m` counts each shader's attachments (`shader_t.refs`; one shader per stage, a new one replaces and releases the old); `glDeleteShader` of an attached shader sets `deleted`, and `shader_release` frees it with its last attachment (`glDetachShader`, a replacing attach, the program's own end). `glDeleteProgram` of the current program sets `prog_t.deleted` and `glUseProgram` of another frees it (`prog_free`, which releases its shaders); any other program goes at once. Both `GL_DELETE_STATUS` queries report the flag. A linked program already held what its link took (functions, shader tables, uniforms), so later attach, detach and delete calls leave it drawing as linked. `make -C dm/gfx/tests GAME=<id> gl-imports` checks the lifetimes through the real entry points.
 - **Found on:** no game: the report reproduced it in `t_gl_imports.m` (an attached vertex shader deleted, then a new fragment shader took its name and the program's vertex stage resolved to it). [Balatro](../../dm/games/0100CD801CE5E000/README.md) takes the path without the symptom: when LÖVE makes its window again it deletes its first three default programs' shaders while they are attached, then the programs (`DM_GL_LOG=1`: `DeleteShader 1 (attached: flagged)` … `DeleteProgram 7`), so each shader now goes with its program; it never links after deleting a shader, and the title and the tutorial draw the same as before.
+- **Check:** `t_gl_imports` also links for real (shaders with their table entries): the linked program keeps both stages' code after its vertex shader is detached and deleted, a relink without that stage fails, and the same shader attached twice is counted once. A second shader of a stage replaces the first and says so once in a red line (desktop GL would link both; the shader tables have one per stage).
 
 ### GL textures, swizzles and uploads
 
