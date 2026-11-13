@@ -21,8 +21,8 @@ static view_t swizzle(uint8_t r, uint8_t g, uint8_t b, uint8_t a) { view_t v = {
 static id<MTLTexture> view_of(int tid) { os_unfair_lock_lock(&g_rmu); id<MTLTexture> v = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu); return v; }
 static int cached(id<MTLTexture> base) { const void *b = (__bridge const void *)base; os_unfair_lock_lock(&g_vb_lk); int r = nvn_hm_get(&g_vb, &b) != NULL; os_unfair_lock_unlock(&g_vb_lk); return r; }
 static int shared(id<MTLTexture> t) { pthread_mutex_lock(&g_smu); int r = own_keeps_locked(t); pthread_mutex_unlock(&g_smu); return r; }
-static uint64_t reused(void) { unsigned n; uint64_t hit, made; mtl_vc_stats(&n, &hit, &made); return hit; }
-static uint64_t made(void) { unsigned n; uint64_t hit, m; mtl_vc_stats(&n, &hit, &m); return m; }
+static uint64_t reused(void) { unsigned n, g; uint64_t hit, made; mtl_vc_stats(&n, &g, &hit, &made); return hit; }
+static uint64_t made(void) { unsigned n, g; uint64_t hit, m; mtl_vc_stats(&n, &g, &hit, &m); return m; }
 static void next_submission(void) { CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "submission completes"); mtl_sub_begin(); }
 enum { SW_R = MTLTextureSwizzleRed, SW_1 = MTLTextureSwizzleOne, SW_0 = MTLTextureSwizzleZero };
 
