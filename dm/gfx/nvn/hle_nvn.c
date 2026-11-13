@@ -1141,8 +1141,25 @@ static int ctl_handle_ok(NVNcommandHandle h) {
     if (h && !(h & 7) && !(h >> 47)) return 1;
     LOG("[RED] CallCommands / CopyCommands: handle %#llx is no command list", (unsigned long long)h); return 0;
 }
-// CallCommands: the called recording's pieces join the caller's list (its records run in place at submit, so its command memory must stay as it was until then; its control
-// memory need not). It takes no command memory
+// The record at p in a piece [ctl_addr(v), pe) of list, into h; 0 at the piece's end, or when the record there does not fit in what is left of the piece. A piece's bytes are
+// what its command memory holds when they are read, as the GPU runs a command set's bytes at submit: a game may record over a called recording before the list that called it is
+// submitted, and then the piece holds the head of other records. Advance Wars 1+2's Unity rendering plugin (main+0x1545800) rotates three command buffers, each re-adding its own
+// block from the start for every render event after a SyncWait on the fence it recorded there last; with four events in a frame the wait is on a fence in the frame's list, not
+// submitted yet, so it returns (on the console too: Unity does not submit between events, and a wait that held would stop the game) and the block's 16-byte fence-only recording
+// became the head of a 504-byte SET_RT. The records that fit run and the piece ends at the first that does not, where the GPU would run part of it (docs/reference/nvn-objects.md,
+// "A called recording recorded over before its caller is submitted")
+static int nvn_piece_record(const void *list, uint64_t v, const uint8_t *p, const uint8_t *pe, op_hdr *h) {
+    if (p >= pe) return 0;
+    memcpy(h, p, sizeof *h);
+    if (h->size >= 8 && !(h->size & 7) && h->size <= (size_t)(pe - p)) return 1;
+    static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+    if (k <= 8 || k % 1000 == 0)
+        LOG("[RED] NVN command list %p: record {op %u, size %u} at %p, %zu bytes into its piece of %zu at %p, does not fit: the piece was recorded over after it was called; the rest of the piece is skipped (%llu so far)",
+            list, h->op, h->size, (const void *)p, (size_t)(p - ctl_addr(v)), (size_t)(pe - ctl_addr(v)), (const void *)ctl_addr(v), (unsigned long long)k);
+    return 0;
+}
+// CallCommands: the called recording's pieces join the caller's list (its records run in place at submit: what its command memory holds then, nvn_piece_record; its control
+// memory may be given out again at once). It takes no command memory
 NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
     cmd_t *o = CB(c);
     if (!o->recording) { LOG("[RED] CallCommands outside a recording"); return; }
@@ -1159,12 +1176,10 @@ NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcom
     if (!o->recording) { LOG("[RED] CopyCommands outside a recording"); return; }
     for (int i = 0; i < n; i++) {
         if (!ctl_handle_ok(h[i])) continue;
-        ctl_iter it = { (const uint8_t *)(uintptr_t)h[i], 0 }; uint64_t v;
+        ctl_iter it = { (const uint8_t *)(uintptr_t)h[i], 0 }; uint64_t v; op_hdr r;
         while (ctl_next(&it, &v))
-            for (const uint8_t *p = ctl_addr(v), *pe = p + ctl_chunk_bytes(v); p < pe; ) {
-                op_hdr r; memcpy(&r, p, sizeof r);
-                if (r.size < 8 || (r.size & 7) || r.size > (size_t)(pe - p)) { LOG("[RED] CopyCommands: a corrupt record at %p in the source", (const void *)p); break; }
-                uint8_t *d = cmd_alloc(o, r.size); memcpy(d, p, r.size); cs_op(r.op, r.size); p += r.size;
+            for (const uint8_t *p = ctl_addr(v), *pe = p + ctl_chunk_bytes(v); nvn_piece_record((const void *)(uintptr_t)h[i], v, p, pe, &r); p += r.size) {
+                uint8_t *d = cmd_alloc(o, r.size); memcpy(d, p, r.size); cs_op(r.op, r.size);
             }
     }
 }
@@ -1178,9 +1193,8 @@ uint8_t *nvn_rec_linear(uint64_t handle, size_t *len) {
         size_t k = ctl_next(&it, &v) ? ctl_chunk_bytes(v) : 0, want = n + k + 8;
         if (want > cap) { uint8_t *nb = realloc(buf, cap = want * 2); if (!nb) die("NVN command list: out of memory for a linear copy"); buf = nb; }
         if (!k) { if (it.done) break; continue; }
-        for (const uint8_t *p = ctl_addr(v), *pe = p + k; p < pe; ) {   // compact records expanded, as the queue's flatten does
-            op_hdr h; memcpy(&h, p, 8);
-            if (h.size < 8 || (h.size & 7) || h.size > (size_t)(pe - p)) die("NVN command list: a corrupt record at %p", (const void *)p);
+        op_hdr h;
+        for (const uint8_t *p = ctl_addr(v), *pe = p + k; nvn_piece_record((const void *)(uintptr_t)handle, v, p, pe, &h); ) {   // compact records expanded, as the queue's flatten does
             uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); const uint8_t *src = p; size_t m = h.size;
             if (rec_compact(h.op)) { m = rec_expand(p, x); src = x; }
             if (n + m + 8 > cap) { uint8_t *nb = realloc(buf, cap = (n + m + 8) * 2); if (!nb) die("NVN command list: out of memory for a linear copy"); buf = nb; }
@@ -1747,7 +1761,6 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
 static void nvn_nop(void) {}
 static const char *const g_nops[] = {
-    "nvnCommandBufferSetPatchSize",
     "nvnCommandBufferSetDepthBounds",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
@@ -3473,6 +3486,7 @@ NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNco
     *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(int)m & 1, 0, a};
 }
 // Fire Emblem: Three Houses turns depth clamp on for its scenes; ignored, the ground right under its close-up battle cameras was clipped away and the lighting pass painted the sky's fog colour there
+NVN(nvnCommandBufferSetPatchSize, void, NVNcommandBuffer *c, int n) { REC(c, OP_PATCH_SIZE, p_patch_size)->n = n; }   // replayed by nvn_tess.inc
 NVN(nvnCommandBufferSetDepthClamp, void, NVNcommandBuffer *c, uint32_t en) { REC(c, OP_DEPTH_CLAMP, p_depth_clamp)->on = (en & 0xff) != 0; }
 // Absolum (FNA3D's NVN driver) keeps the lower-left window origin and sets viewport 0's swizzle every frame (NEGATIVE_Y: clip y negated, how a GL-heritage renderer flips its picture).
 // Ignored, its whole picture came out upside down. The replay applies it to the viewport (draw in nvn_mtl.m)
