@@ -1,5 +1,6 @@
 """The prewarm seed lists shipped in the game profiles (dm/games/<id>/pso_manifest.tsv, read by the host's warm_parse): every row is one the host parses (S shader key and
-stage, R render pipeline key, C compute shader key, M task shader key or - and a native task / mesh pipeline key; a pipeline key is pso_skey as hex), a list has at most one
+stage, R render pipeline key, C compute shader key, M task shader key or - and a native task / mesh pipeline key; a pipeline key is pso_skey as hex; G vertex key
+and geometry key of a lean geometry pair with no mesh library, which dmsh_build.py builds one for), a list has at most one
 #@after_first_frame line, and Ocarina of Time's list: no row twice, its shader keys all in its shader map, the mark present, and every M row before it (task / mesh pipelines have
 no stand-in while they build, so they are prepared before the first frame). No game files needed."""
 from pathlib import Path
@@ -19,6 +20,7 @@ def row_ok(row):
     if f[0] == 'C': return len(f) == 2 and KEY.fullmatch(f[1]) is not None
     if f[0] == 'R': return len(f) == 2 and HEX.fullmatch(f[1]) is not None
     if f[0] == 'M': return len(f) == 3 and (f[1] == '-' or KEY.fullmatch(f[1]) is not None) and HEX.fullmatch(f[2]) is not None
+    if f[0] == 'G': return len(f) == 3 and all(re.fullmatch(r'[0-9a-f]{16}', x) for x in f[1:])
     return False
 
 
