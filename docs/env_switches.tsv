@@ -165,6 +165,7 @@ DM_NVN_FAST_WAKE	switch	`0` makes the game's `SyncWait`s wake on the commit feed
 DM_NVN_FB_DEPTH	switch	`0` lets a draw that samples the depth attachment of its own render pass read it in the pass, as before (undefined on Apple's GPUs: compressed blocks of what the tiles stored so far); by default a draw that also writes depth or stencil reads a copy, reused until the game's next barrier, and one after a draw of its pass wrote depth ends the pass first
 DM_NVN_FB_SNAP	switch	Draws that sample a colour attachment of their own render pass: unset, those that write it (or follow a write in the pass) read a snapshot, reused until the game's next barrier; `0` none; `all` a fresh snapshot for every draw that samples one (slow, diagnostic, no tile reads)
 DM_NVN_FB_TILE	switch	`0` makes such draws that sample the attachment at their own pixel (a projective sample at the vertex shader's screen varying) read a snapshot too, instead of the tile
+DM_NVN_FB_TILE_EARLY	switch	`0` makes such a draw that opens its render pass take a snapshot, as it did before; by default it reads the tile of the pass it opens, whose formats were learned from the first such draw of its program on those targets
 DM_NVN_FLUSH_FILL	switch	`0` starts a new GPU texture in a CPU-writable pool as zeros; by default one whose storage the game flushed before its first use is filled from that storage once
 DM_NVN_FRAMES	diagnostic	`=<N>` prints the NVN call table frame by frame for the first N frames (default 3)
 DM_NVN_FRAME_LAG	switch	`=<k>`: a frame starts (the first AcquireTexture after a present) only once the GPU has completed the work presented k presents before the newest; `0` = no CPU / GPU overlap across frames (off by default; `@lag_ms` per frame in `DM_NVN_TSV`)
@@ -197,6 +198,7 @@ DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped 
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
 DM_NVN_MDX_PRESCAN	switch	`0` copies an indirect-count multi-draw's records at its own first draw, which splits a render pass an earlier draw opened; by default the draw that opens a pass copies those of the multi-draws after it first (ab with DM_AB)
+DM_NVN_MFX_DIRECT	switch	`0` copies the game's colour into MetalFX's RGBA16F input (DM_UPSCALER=metalfx) unless it is RGBA16F; by default an input that is the whole rectangle MetalFX reads is taken in its own format (ab with DM_AB)
 DM_NVN_PARTIAL_UPLOAD	switch	`0` reads a texture whole from its storage at every re-upload; by default a re-upload reads only the images (a layer's level) with a page written since the last upload and copies the others from the texture it replaces
 DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents, and the host function and line that ended each pass) for the `tbdr_*.py` tools
 DM_NVN_PASSDUMP_ALL	diagnostic	`=1` makes `DM_NVN_PASSDUMP` record every draw and binding change, not only the first per pass and stage, including copies and inline uniform updates
@@ -267,7 +269,6 @@ DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a c
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
 DM_NVN_VCONV_KEEP	switch	`=0` turns off the kept vertex conversions (`vk_get`); `=<n>` sets the smallest range kept, in vertices (default 4096, which `=1` also gives)
 DM_NVN_VCONV_RANGE	switch	`0` / `1` overrides the profile's `vconv_range`: CPU vertex conversion only over the vertices each draw reads instead of the whole bound range
-DM_NVN_VC_KEEP	switch	`1` (default) keeps the texture-view set of a finalized texture that a registered ID still resolves through the ghost table, until the owner lets the serial go (vc_ghost_sweep, at the first commit of each frame); `0` refuses such sets, so each submission that reads the ID makes its view again; `ab` alternates it with the DM_AB phases
 DM_NVN_VLOG	diagnostic	Set: logs each NVN memory pool as it is created (address, memory, size, flags) with a backtrace
 DM_NVN_VSDUMP	path	Output file for post-vertex captures; used with DM_NVN_VSDUMP_KEY and the frame/count bounds
 DM_NVN_VSDUMP_FROM	diagnostic	First presented frame eligible for a post-vertex capture (default 0)
