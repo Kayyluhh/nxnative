@@ -56,14 +56,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(!g_treg[1].view, "the ID's own view goes at the submission's end");
     uint64_t made1 = g_vc_new; id<MTLTexture> again = read_id(1); read_id(1);
     os_unfair_lock_lock(&g_rmu); vc_set *s = nvn_hm_get(&g_vc, &ser); os_unfair_lock_unlock(&g_rmu);
-    // In the PR batch, views are also cached by the Metal texture they are made of (vb_get, PR #2260): the first read after finalization finds the view made while the texture was
-    // live there, makes none, and enters it in the finalized texture's set; with DM_NVN_VC_KEEP=0 no set is kept, and that cache still gives the same view
     if (!off) {
-        CHECK(made1 == made0 && first == live, "the first submission after finalization makes no view: the one made while the texture was live comes from the cache by Metal texture");
+        CHECK(made1 - made0 == 1, "the first submission after finalization makes the view once");
         CHECK(g_vc_new == made1 && again == first, "later submissions reuse the finalized texture's view");
         CHECK(s && s->ghost, "the set is marked as a finalized texture's");
     } else {
-        CHECK(g_vc_new == made1 && again == first && !s, "DM_NVN_VC_KEEP=0: no set is kept; the view comes from the cache by Metal texture");
+        CHECK(g_vc_new == made1 && again != first && !s, "DM_NVN_VC_KEEP=0: no set is kept, each submission makes its view again");
     }
     os_unfair_lock_lock(&g_rmu);
     CHECK(!vc_set_for(ser, &pool, 0), "a texture buffer's rows are not kept in a finalized texture's set");
