@@ -1712,6 +1712,30 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`DirectedRounding`: two fail on `main`). A GPU cross-check against an exact reference (one rounding, IEEE directed modes; NAK's hardware test for F2F.F16.F32.RZ's overflow): I2F 45 mismatches in 300, none with the fix; F2F 25-31 in 300, 6 left, all with results at or below 0x050d (half subnormals and the smallest normals, where the GPU's own conversion differs). Also left: FRND / F2I of a 32-bit subnormal (FLOOR of a tiny negative is -1 on NVIDIA; the GPU flushes it to zero).
 - **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
 
+### I2F from a 64-bit integer rounds once
+
+- **Symptom:** `I2F` from a signed or unsigned 64-bit register pair to f32 can give the wrong float. A negative integer close to zero can lose its entire value during cancellation.
+- **Cause:** `AI2f64` rounded the high and low words separately as floats before adding them, and discarded the rounding mode. The division sequence that introduced the emitter used a zero high word, where the old nearest-rounding calculation is exact.
+- **Fix:** form the magnitude as two integer words, normalize to recover the 24 retained bits and the round and sticky bits, and round once in the encoded mode. Set the low bit of the leading-bit search operand to keep the shift counts valid for zero. Return positive zero for a zero input. This applies to the Ampere register-pair form with an f32 destination.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. Signed nearest-even changes from 16 differences to zero across 1,024 recorded Jetson Orin lanes. All 112 synthetic boundary lanes and a separate 36,244-lane exact-reference comparison match on the Mac for signed and unsigned inputs in RN, RM, RP and RZ. All eight synthetic shaders validate as SPIR-V and compile offline for iOS. The directed modes and unsigned conversion are covered by synthetic references. No games or iOS device ran.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2045](https://github.com/seedds/nxnative/pull/2045). The opcode appears in the [Fire Emblem Fortune's Weave lighting path](#texture-handles-of-sdk-22s-ampere-code).
+
+### F2FP packs BF16 and applies RELU and RZ
+
+- **Symptom:** `F2FP.BF16.PACK_AB` returns a pair of F16 values, and `F2FP.RELU.PACK_AB` keeps negative values. A toward-zero pack can round away from zero or turn a finite value into infinity.
+- **Cause:** `AF2fp` used the same nearest-even F16 pack for all `PACK_AB` instructions. It ignored the format, clamp and rounding bits.
+- **Fix:** clamp negative inputs, including -0 and -infinity, to +0 for `.RELU`. Preserve NaNs through the clamp and emit canonical `0x7fff` in `.RELU` lanes. BF16 uses the upper 16 input bits, with a nearest-even bias when requested, and canonicalizes NaNs. F16 `.RZ` widens the rounded half's magnitude and steps it back one code when a finite input rounded away from zero. Plain F16 `.RN` and Pokopia's plain `.MERGE_C` keep their existing conversion.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. Recorded differences fall from 1,880 to zero for BF16 and from 913 to zero for F16 `.RELU`, each across 2,048 halves. Plain F16 `.RN` has the same 44 NaN-bit differences (Orin `0x7fff`, Metal `0x7e00`). Six synthetic forms cover BF16 ties, combined BF16 `.RELU` and F16 truncation. All 64 exact boundary halves pass with default and relaxed Mac math, and a separate sweep of 2,072,574 halves also matches its exact reference. Eight shaders compile offline for iOS. Plain F16 `.RN` and both plain Pokopia `.MERGE_C` examples emit identical MSL on main and the fix.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2046](https://github.com/seedds/nxnative/pull/2046). The new combinations and `.RZ` are checked against synthetic references. No game or iOS device ran.
+
+### IDP integer dot products
+
+- **Symptom:** an Ampere shader using `dp4a` or `dp2a` fails translation with `Ampere instruction 226 ... is not implemented` for the register form.
+- **Cause:** the Ampere decoder had no IDP entry for opcode `0x026` in the low nine bits.
+- **Fix:** register `InstName.Idp` and use the shared ALU operand reader. `AIdp` extracts the four bytes of each source for DP4A or extracts two halfwords of A and B's low or high pair of bytes for DP2A. Signedness is independent for each source. Integer multiplies and adds accumulate the products into C with 32-bit wraparound. Before optimization the lowering emits 16 IR operations for DP4A and eight for DP2A.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. All five recorded register programs were refused on main and now match all 5,120 Orin lanes. Four synthetic shaders cover the B and C constant-buffer slots for DP4A and DP2A, with all 16 lanes matching using a nonzero Metal argument-buffer word at `c[3][5]`. Another 144 synthetic lanes cover independent signedness, DP2A low and high pairs, wraparound, immediate and uniform-register inputs. All 27 IDP shaders validate as SPIR-V and compile offline for iOS.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2052](https://github.com/seedds/nxnative/pull/2052). Only register forms have recorded Orin outputs in this fixture. No affected game is documented. No games or iOS device ran.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.
