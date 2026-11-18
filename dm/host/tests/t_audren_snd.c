@@ -34,6 +34,10 @@ uint64_t now_ns(void) { return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
+uint64_t hle_system_event_binding(void *ev) { return (uint64_t)(uintptr_t)ev; }   // hle_audren.c's device notifications (dm.h): no events in this test
+int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 0; }
+int dm_audio_route(void) { return 2; }   // the stereo route, as t_audren_layout takes it
+int dm_audio_output_channels(void) { return 2; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
