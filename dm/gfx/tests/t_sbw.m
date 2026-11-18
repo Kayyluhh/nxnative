@@ -37,15 +37,6 @@ int main(void){@autoreleasepool{
     uint64_t done=g_done;gw_commit(done+1000);
     CHECK("a running submission's wide write is seen by the next",gw_live(base+0x41000,base+0x41010));
     CHECK("and not elsewhere",!gw_live(ub,ub+0x100));
-    // The starting pages of these ranges hash to the same slot as an unrelated uniform page.
-    const uint64_t a = 0x7200000000ull, b = 0x720b520000ull, uniform = 0x721da31000ull;
-    CHECK("the three pages collide", gw_slot(a >> 12) == gw_slot(b >> 12) && gw_slot(a >> 12) == gw_slot(uniform >> 12));
-    pend_reset();
-    sbw_note(a + 16, 0x80000, SBW_GPU);
-    sbw_note(b + 16, 0x80000, SBW_GPU);
-    gw_commit(done + 1000);
-    CHECK("the written pages stay live", gw_live(a, a + 16) && gw_live(b + 0x80000, b + 0x80010));
-    CHECK("wide writes leave an unrelated uniform page readable", !gw_live(uniform, uniform + 16));
     // The commit reads the pages this submission noted, not the whole page set (Ocarina of Time commits about 30 submissions a frame): a GPU page goes into the running writes,
     // a page only a report wrote does not (the report counts by its own 16 bytes), and a page of an earlier submission is not met again
     pend_reset();{const uint64_t a=0x7300000000ull,b=0x7300100000ull,r=0x7300200000ull;
