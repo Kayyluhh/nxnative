@@ -619,6 +619,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
 - **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
 
+### Unreal Engine frozen pak indices (version 9)
+
+- **Symptom:** the shader split finds no shaders although the RomFS contains Unreal `.pak`, `.utoc` and `.ucas` files; `uepak.footer` reports `no pak footer` on paks whose footer version is 9.
+- **Cause:** version 9 adds a `FrozenIndex` byte before the footer's compression-method names, moving its magic to 0xcd bytes from the end. When that flag is set, the index is a frozen memory image, not version 8's serialized entries: relative pointers, UTF-16 strings, 80-byte `FPakEntry` records and nested sparse directory maps. Merely accepting the version still misreads the index.
+- **Fix:** `uepak.py` reads the flag, bounds the frozen pointers and arrays, enumerates allocated map slots and resolves each filename's entry index. The compressed blocks retain entry-relative offsets and the data files retain their serialized headers. A clear flag uses the existing version 8 index reader. Encrypted-index key discovery validates the pointed-to UTF-16 mount, including non-ASCII names. Shader discovery routes shared archives to extraction and inline packages and global shader caches to the split, including when both are in the same pak. The split finds adjacent inline IoStore export bundles from their TOC metadata, even when the pak names no global cache.
+- **Check:** `dm/tools/tests/test_uepak_v9.py` exercises both index layouts, sparse-map holes, backward pointers, UTF-16 names, malformed ranges and references, deleted entries, and stored and multi-block Zlib data. Synthetic packing checks cover a mixed pak, a v2 IoStore TOC beside an empty pak, and key discovery for a non-ASCII mount.
+- **Found on:** Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles ([issue #2134](https://github.com/seedds/nxnative/issues/2134), [PR #2476](https://github.com/seedds/nxnative/pull/2476)), Crash Bandicoot 4: It's About Time ([issue #1577](https://github.com/seedds/nxnative/issues/1577)), and DRAGON QUEST TREASURES ([PR #1260](https://github.com/seedds/nxnative/pull/1260)).
+
 ### An encrypted legacy Unreal pak with the shaders inline
 
 - **Symptom:** the shader split says `[RED] /<pak>: the pak cannot be read (<path>: the index is encrypted and no key was given); its shaders are left out`, then `[RED] the shader split found no shaders in main or the RomFS` when that pak holds all of them.
@@ -1735,6 +1743,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** register `InstName.Idp` and use the shared ALU operand reader. `AIdp` extracts the four bytes of each source for DP4A or extracts two halfwords of A and B's low or high pair of bytes for DP2A. Signedness is independent for each source. Integer multiplies and adds accumulate the products into C with 32-bit wraparound. Before optimization the lowering emits 16 IR operations for DP4A and eight for DP2A.
 - **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. All five recorded register programs were refused on main and now match all 5,120 Orin lanes. Four synthetic shaders cover the B and C constant-buffer slots for DP4A and DP2A, with all 16 lanes matching using a nonzero Metal argument-buffer word at `c[3][5]`. Another 144 synthetic lanes cover independent signedness, DP2A low and high pairs, wraparound, immediate and uniform-register inputs. All 27 IDP shaders validate as SPIR-V and compile offline for iOS.
 - **Found on:** the Jetson Orin sm_87 probes from [PR #2052](https://github.com/seedds/nxnative/pull/2052). Only register forms have recorded Orin outputs in this fixture. No affected game is documented. No games or iOS device ran.
+
+### VABSDIFF, the absolute difference with an add
+
+- **Symptom:** an Ampere shader using `sad.u32` fails translation with `Ampere instruction 214 ... is not implemented` for the register form.
+- **Cause:** the GPU compiler emits `VABSDIFF.U32`, and the Ampere decoder had no entry for opcode `0x014` in the low nine bits.
+- **Fix:** `AVabsdiff` uses the shared ALU operand reader and emits `max(a, b) - min(a, b) + c` with 32-bit wraparound. Bit 73 selects signed ordering. Bits 81–83 are the `Pu` predicate field. The recorded form uses `PT`, so other `Pu` values and unrecognized modifiers are rejected. The lowering emits four integer IR operations before optimization.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. The previously refused unsigned register program now matches all 1,024 recorded lanes, including 416 wrapping additions. All 64 synthetic lanes match, including signed extrema, immediate and uniform-register sources, and 16 lanes using nonzero constants at `c[3][5]` in slots B and C. Separate probes confirm that a non-PT `Pu` and an unrecognized modifier fail translation. Nine supported shaders validate as SPIR-V and compile and link offline for iOS.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2053](https://github.com/seedds/nxnative/pull/2053). Signed and non-register cases use synthetic references. No affected game is documented. No games or iOS device ran.
 
 ### A guarded load whose destination is its address
 
