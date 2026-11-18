@@ -35,7 +35,7 @@ static AudioObjectPropertyListenerProc system_route_listener, device_route_liste
 static OSStatus mock_route_add(AudioObjectID id, const AudioObjectPropertyAddress *pa, AudioObjectPropertyListenerProc cb, void *ctx) {
     assert(!ctx);
     if (id == kAudioObjectSystemObject) { assert(pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice); system_route_listener = cb; }
-    else { assert(pa->mSelector == kAudioDevicePropertyStreamFormat); device_route_listener = cb; }
+    else { assert(pa->mSelector == kAudioDevicePropertyStreamFormat || pa->mSelector == kAudioDevicePropertyPreferredChannelLayout); device_route_listener = cb; }
     return noErr;
 }
 static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAddress *pa, AudioObjectPropertyListenerProc cb, void *ctx) {
@@ -55,6 +55,7 @@ static struct {
     unsigned writes, disposals, input_formats;
     OSStatus init_error;
     int route_ch;                        // the device's output stream format channels (the route)
+    int speakers;                        // its speaker configuration: SPK_NONE (no layout), SPK_PAIR (an interface: 1 and 2 left and right, the rest unlabelled), SPK_51_TAG, SPK_51_BITMAP
     int format_ch;                       // channels of the unit's input format, as last set
     AudioChannelLayoutTag layout_tag;    // the unit's input channel layout, as last set (0: none)
 } unit;
@@ -128,6 +129,12 @@ static OSStatus mock_remove(AudioUnit au, AudioUnitPropertyID id, AudioUnitPrope
 }
 // The system's default output and its stream format (its output channels): the route the host reads. A system object, unlike the unit's CurrentDevice, which disposal clears
 enum { SYS_OUT = 100 };
+enum { SPK_NONE, SPK_PAIR, SPK_51_TAG, SPK_51_BITMAP };
+// The speaker configuration's size: descriptions for SPK_PAIR (one per stream channel), the bare header for a tag or a bitmap
+static UInt32 speakers_size(void) {
+    UInt32 head = (UInt32)offsetof(AudioChannelLayout, mChannelDescriptions);
+    return unit.speakers == SPK_PAIR ? head + (UInt32)unit.route_ch * (UInt32)sizeof(AudioChannelDescription) : (UInt32)sizeof(AudioChannelLayout);
+}
 static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *pa, UInt32 q, const void *qd, UInt32 *sz, void *data) {
     (void)q; (void)qd; (void)sz;
     if (pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice) { assert(id == kAudioObjectSystemObject); *(AudioDeviceID *)data = SYS_OUT; return noErr; }
@@ -135,10 +142,25 @@ static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *p
         assert(id == SYS_OUT && pa->mScope == kAudioObjectPropertyScopeOutput);
         AudioStreamBasicDescription f = {.mChannelsPerFrame = (UInt32)unit.route_ch}; memcpy(data, &f, sizeof f); return noErr;
     }
+    if (pa->mSelector == kAudioDevicePropertyPreferredChannelLayout && unit.speakers != SPK_NONE) {
+        assert(id == SYS_OUT && pa->mScope == kAudioObjectPropertyScopeOutput && *sz >= speakers_size());
+        AudioChannelLayout *l = data; memset(l, 0, speakers_size());
+        if (unit.speakers == SPK_51_TAG) l->mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A;
+        else if (unit.speakers == SPK_51_BITMAP) {
+            l->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelBitmap;
+            l->mChannelBitmap = kAudioChannelBit_Left | kAudioChannelBit_Right | kAudioChannelBit_Center | kAudioChannelBit_LFEScreen | kAudioChannelBit_LeftSurround | kAudioChannelBit_RightSurround;
+        } else {
+            l->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions; l->mNumberChannelDescriptions = (UInt32)unit.route_ch;
+            for (int i = 0; i < unit.route_ch; i++) l->mChannelDescriptions[i].mChannelLabel = i == 0 ? kAudioChannelLabel_Left : i == 1 ? kAudioChannelLabel_Right : kAudioChannelLabel_Unknown;
+        }
+        *sz = speakers_size(); return noErr;
+    }
     return kAudioHardwareUnknownPropertyError;   // no device name (DM_AUDIO_DEVICE is unset in this test)
 }
 static OSStatus mock_aogpds(AudioObjectID id, const AudioObjectPropertyAddress *pa, UInt32 q, const void *qd, UInt32 *sz) {
-    (void)id; (void)pa; (void)q; (void)qd; (void)sz; return kAudioHardwareUnknownPropertyError;   // device lists: none (DM_AUDIO_DEVICE is unset here)
+    (void)q; (void)qd;
+    if (pa->mSelector == kAudioDevicePropertyPreferredChannelLayout && unit.speakers != SPK_NONE) { assert(id == SYS_OUT); *sz = speakers_size(); return noErr; }
+    return kAudioHardwareUnknownPropertyError;   // device lists: none (DM_AUDIO_DEVICE is unset here); no speaker configuration
 }
 static OSStatus mock_init(AudioUnit au) { assert(au == fake_au()); return unit.init_error; }
 static dispatch_semaphore_t start_entered, start_allowed, guest_returned, device_stopped, guest_closed, device_disposed;
@@ -287,6 +309,21 @@ static void test_route_without_output(void) {
     while (dm_audio_route() != 2 && now_ns() < until) usleep(1000);
     assert(dm_audio_route() == 2);
 }
+// The speaker configuration decides whether many channels are a 5.1 system: an audio interface's 34 discrete outputs, with only 1 and 2 labelled left and right
+// (Universal Audio Thunderbolt), are a stereo route, so the game mixes for stereo; a 5.1 configuration, by tag or by bitmap, is six. A change to it alone is a route change
+static void test_route_speakers(void) {
+    unit.route_ch = 34; unit.speakers = SPK_PAIR;
+    assert(dm_audio_output_channels() == 2);
+    unit.speakers = SPK_51_TAG;
+    AudioObjectPropertyAddress pa = {kAudioDevicePropertyPreferredChannelLayout, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+    device_route_listener(SYS_OUT, 1, &pa, NULL);
+    uint64_t until = now_ns() + NSEC_PER_SEC;
+    while (dm_audio_route() != 6 && now_ns() < until) usleep(1000);
+    assert(dm_audio_route() == 6);
+    unit.speakers = SPK_51_BITMAP; unit.route_ch = 8; assert(dm_audio_output_channels() == 6);
+    unit.route_ch = 2; assert(dm_audio_output_channels() == 2);   // a 5.1 configuration on a two-channel stream is still two
+    unit.speakers = SPK_NONE; assert(dm_audio_output_channels() == 2);
+}
 static void test_sink_route(void) {
     unit.route_ch = 2; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
     void *key = dm_pcmout_open_sink(); aout *a = ao(key);
@@ -317,6 +354,7 @@ static void test_sink_route(void) {
 int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
     test_route_without_output();
+    test_route_speakers();
     unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096}; unit.frames = 512;
     uint32_t out[16] = {0}; uint8_t prm[16]; h_au_InitParam(prm);
     check_open_publication = 1;
