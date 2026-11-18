@@ -14,7 +14,6 @@ DM_AUDIO_CAPTURE_CH	test	`=<n>`: the channels `tests/t_audio_live.c` records wit
 DM_AUDIO_CAPTURE_DEVICE	test	`=<part of a device name>`: `tests/t_audio_live.c` records that device instead of the one playing at start (the target of a switch)
 DM_AUDIO_DEVICE	diagnostic	`=<part of a device name>` (Mac) plays the audio on the output device with that name (a virtual device such as BlackHole 16ch, for tests); the default output otherwise
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
-DM_AUDIO_INPUT	switch	`1` / `0` overrides the profile's `audio_input`: whether the SDK's input streams are served from the Mac's microphone (`hle_audio.c` `audio_input_on`); unset, only a profile with `audio_input on` (Ocarina of Time) gets it
 DM_AUDIO_LIVE_PCM	test	`=<file>`: `tests/t_audio_live.c` plays that file (16-bit, 48 kHz, six channels interleaved in the guest's order) instead of its test tones
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDIO_SYNC	player	`auto` (the default) holds the sound back by the picture's measured delay with the display link (`hle_audio.c` `sync_delay`); `0` plays it at once; `=<ms>` holds it that long (at most 150)
@@ -129,8 +128,6 @@ DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second write
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
-DM_MIC_DEVICE	player	`=<CoreAudio device UID>` picks the microphone a game's audio input streams capture from instead of the system default input; an unavailable UID falls back to the default (the Mac launcher sets it from its input-device picker)
-DM_MIC_GAIN	player	`=<factor>` multiplies the captured microphone samples before the game reads them (1 to 8, default 4, soft-limited; the Mac launcher sets it from its gain control)
 DM_MOTION	switch	`0` ignores live motion: every six-axis sensor lies flat as before (a shake still plays), and neither controllers' motion sensors nor the phone's device motion are switched on (`hle_hid.c`, `motion_apple.h`, `DmGamepad.m`); the NSP script's `--no-motion` (`MOTION = False`) builds it in
 DM_MOTION_ACC_SIGN	switch	`-1` flips only GameController's acceleration, for a source that reports the specific force (+1 G up at rest) instead of the gravity direction (`motion_fusion.h`); phone and raw HID samples are already in the Switch frame
 DM_MOTION_AXES	switch	`=<map>` such as `x,-z,y`: maps Apple's controller axes to the Switch's, a signed permutation applied to acceleration and rotation alike, for a controller whose axes differ (default `x,y,z`; phone and raw HID samples are already in the Switch frame)

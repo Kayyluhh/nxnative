@@ -14,7 +14,6 @@ from pathlib import Path
 import plistlib
 import shutil
 import signal
-import struct
 import subprocess
 import sys
 import tempfile
@@ -50,20 +49,6 @@ int main(int argc, char **argv) {
     return 7;
 }
 '''
-
-
-def patched_module_with_import(symbol):
-    image = bytearray(0x220)
-    struct.pack_into('<I', image, 4, 0x20)
-    image[0x20:0x24] = b'MOD0'
-    struct.pack_into('<i', image, 0x24, 0x40)
-    for i, (tag, value) in enumerate(((6, 0x100), (5, 0x180), (4, 0x140), (0, 0))):
-        struct.pack_into('<qQ', image, 0x60 + i * 16, tag, value)
-    struct.pack_into('<I', image, 0x144, 2)  # DT_HASH nchain: the null symbol and one import
-    struct.pack_into('<IBBHQQ', image, 0x118, 1, 0x10, 0, 0, 0, 0)
-    encoded = b'\0' + symbol.encode() + b'\0'
-    image[0x180:0x180 + len(encoded)] = encoded
-    return image
 
 
 class Copy(unittest.TestCase):
@@ -137,7 +122,7 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'pso/gpu-prewarm-00.mtl4a': b'bases', 'pso/gpu-prewarm-00.keys': b'DMPSOIX1', 'pso/prewarm.tsv': b'stamp',   # --prebake's files and their index
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbol parser',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -602,26 +587,6 @@ class PackReuse(unittest.TestCase):
         self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), before)
         self.assert_repacked()
 
-    def test_bundle_marks_only_imported_audio_input_apis(self):   # and only for a profile with audio_input on (Ocarina of Time's)
-        module = self.tmp / 'patched/main.patched.bin'
-        profile = self.tmp / 'profile/game.tsv'
-        profile.write_text('title_id\t0100000000000000\naudio_input\ton\n')
-        module.write_bytes(patched_module_with_import('_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeE'))
-        self.pack()
-        info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
-        self.assertIs(info['DMUsesAudioInput'], True)
-
-        module.write_bytes(patched_module_with_import('_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeE'))
-        self.assert_repacked()
-        info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
-        self.assertIs(info['DMUsesAudioInput'], False)
-
-        profile.write_text('title_id\t0100000000000000\n')   # the input API imported, the profile without the key (Star Fox): no microphone settings, no permission request
-        module.write_bytes(patched_module_with_import('_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeE'))
-        self.assert_repacked()
-        info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
-        self.assertIs(info['DMUsesAudioInput'], False)
-
 
 class Sign(unittest.TestCase):
     def setUp(self):
@@ -751,8 +716,6 @@ class App(unittest.TestCase):
         p = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))
         self.assertEqual((p['DMTitleID'], p['DMLanguage'], p['DMRomfsMarker'], p['CFBundleIconFile']), (TID, 'fr', 'region_common/audio/edward.bfsar', 'AppIcon'))
-        self.assertEqual(p['NSMicrophoneUsageDescription'], 'Game: Test uses the microphone for in-game audio input.')
-        self.assertIs(p['DMUsesAudioInput'], False)
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)

@@ -51,6 +51,3 @@ tex_dirty_upload	on
 # replay: with Metal encoding on its own thread a GPU-bound Hyrule Field scene went 55.3-55.8 -> 56.5-56.9 fps (Apple M4 Pro, three runs a side, interleaved); on an M3 Pro, the village
 # after the opening (three runs a side), 48.2 -> 49.0 fps, frame p50 16.82 -> 16.72 ms, GPU time unchanged (PR #2719). As on iOS, where it is on for every game
 enc_thread	on
-# The ocarina can be played into the Mac's microphone: the game's SDK 21 input streams are served from it (PR #1822). Only this profile asks for it, so no other game captures
-# or makes macOS ask for microphone permission
-audio_input	on
