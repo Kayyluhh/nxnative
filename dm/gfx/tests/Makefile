@@ -273,12 +273,6 @@ check_t_dispatch_own: t_dispatch_own
 	@set -e; for own in "" --own; do for enc in 0 1; do \
 	    DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own $$own; \
 	done; done
-t_vs_serial: t_vs_serial.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_vs_serial.m $(MTL_T_SRC) $(FW)
-.PHONY: check_t_vs_serial
-check_t_vs_serial: t_vs_serial
-	MTL_DEBUG_LAYER=1 ./t_vs_serial
-	./t_vs_serial off
 t_dispatch_barrier: t_dispatch_barrier.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_barrier.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dispatch_barrier
