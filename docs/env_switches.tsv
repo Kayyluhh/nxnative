@@ -14,6 +14,7 @@ DM_AUDIO_CAPTURE_CH	test	`=<n>`: the channels `tests/t_audio_live.c` records wit
 DM_AUDIO_CAPTURE_DEVICE	test	`=<part of a device name>`: `tests/t_audio_live.c` records that device instead of the one playing at start (the target of a switch)
 DM_AUDIO_DEVICE	diagnostic	`=<part of a device name>` (Mac) plays the audio on the output device with that name (a virtual device such as BlackHole 16ch, for tests); the default output otherwise
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
+DM_AUDIO_INPUT	switch	`1` / `0` overrides the profile's `audio_input`: whether the SDK's input streams are served from the Mac's microphone (`hle_audio.c` `audio_input_on`); unset, only a profile with `audio_input on` (Ocarina of Time) gets it
 DM_AUDIO_LIVE_PCM	test	`=<file>`: `tests/t_audio_live.c` plays that file (16-bit, 48 kHz, six channels interleaved in the guest's order) instead of its test tones
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDIO_SYNC	player	`auto` (the default) holds the sound back by the picture's measured delay with the display link (`hle_audio.c` `sync_delay`); `0` plays it at once; `=<ms>` holds it that long (at most 150)

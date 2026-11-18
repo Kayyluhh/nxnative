@@ -602,14 +602,22 @@ class PackReuse(unittest.TestCase):
         self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), before)
         self.assert_repacked()
 
-    def test_bundle_marks_only_imported_audio_input_apis(self):
+    def test_bundle_marks_only_imported_audio_input_apis(self):   # and only for a profile with audio_input on (Ocarina of Time's)
         module = self.tmp / 'patched/main.patched.bin'
+        profile = self.tmp / 'profile/game.tsv'
+        profile.write_text('title_id\t0100000000000000\naudio_input\ton\n')
         module.write_bytes(patched_module_with_import('_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeE'))
         self.pack()
         info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
         self.assertIs(info['DMUsesAudioInput'], True)
 
         module.write_bytes(patched_module_with_import('_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeE'))
+        self.assert_repacked()
+        info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
+        self.assertIs(info['DMUsesAudioInput'], False)
+
+        profile.write_text('title_id\t0100000000000000\n')   # the input API imported, the profile without the key (Star Fox): no microphone settings, no permission request
+        module.write_bytes(patched_module_with_import('_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeE'))
         self.assert_repacked()
         info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
         self.assertIs(info['DMUsesAudioInput'], False)

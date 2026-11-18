@@ -338,6 +338,13 @@ def selected_inputs(a):
     return mods, msls, pso, tables, pairs, fonts, files
 
 
+def profile_audio_input(tables):
+    """Whether the game profile (its game.tsv in the --tables folder) gives the game the microphone: `audio_input on` (dm/games/game.py; off by default)"""
+    try: rows = (Path(tables) / 'game.tsv').read_text().splitlines()
+    except OSError: return False
+    return any(r.split('\t')[:2] == ['audio_input', 'on'] for r in rows)
+
+
 def audio_input_capable(modules):
     """Whether a packed module imports a public nn::audio input API."""
     markers = ('InputStream', 'AudioIn', 'InputDevice')
@@ -524,7 +531,7 @@ def pack(a):
     info = info_plist(a, minos, icon)
     info['DMModuleFiles'] = [p.name for p in mods]
     audio_modules = mods + [module for program in programs for module in program[4]]
-    info['DMUsesAudioInput'] = audio_input_capable(audio_modules)
+    info['DMUsesAudioInput'] = profile_audio_input(a.tables) and audio_input_capable(audio_modules)   # the launcher's microphone settings and permission request: only a game the host gives the microphone
     commit = source_commit()
     if commit: info['DMCommit'] = commit
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)

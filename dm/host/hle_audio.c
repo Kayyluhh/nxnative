@@ -922,8 +922,17 @@ HLE_FORCE("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", "
     (void)g; (void)reset; os_stats s = {0}; return s;
 }
 typedef struct { int32_t format, channels, rate; } os_format;   // nn::audio::StreamFormat, 12 bytes: returned in registers
+// The microphone is served only to a game whose profile asks for it (audio_input on: Ocarina of Time's ocarina); DM_AUDIO_INPUT=1 / 0 overrides. Any other game that imports the
+// input streams (Star Fox and GameChat) sees no input device and its open fails, as before the host had a microphone, so it neither captures nor makes macOS ask for permission
+static int audio_input_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_AUDIO_INPUT"); v = e && *e ? atoi(e) != 0 : DM_GAME_AUDIO_INPUT;
+        LOG("audio input: the microphone is %s for this game (%s)", v ? "on" : "off", e && *e ? "DM_AUDIO_INPUT" : "the profile's audio_input"); }
+    return v;
+}
 // SDK 21's polling input streams (OoT also ships this SDK API). This path has no AudioInBuffer append/release queue; games poll frame counts and read directly.
 HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "list an input device without prompting; the Mac launcher requests permission before play", int, h_is_List, void *names, int n) {
+    if (!audio_input_on()) return 0;
     if (!names || n <= 0 || !dm_audio_input_available()) { LOG("audio input: ListVirtualInputDevices returns 0 (permission or device unavailable)"); return 0; }
     dm_audio_input_device_name(names);
     LOG("audio input: ListVirtualInputDevices returns 1 virtual device");
@@ -934,6 +943,7 @@ HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePro
 HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "open a polling queue; hardware start is deferred until StartInputStream", Result, h_is_Open,
           void *g, void *buf, size_t size, const char *dev, const void *fmt, int frames) {
     (void)buf; (void)size;
+    if (!audio_input_on()) return RES_FAIL;
     if (!g || !dev || !fmt || strncmp(dev, "AudioVirtualInput", sizeof "AudioVirtualInput") || objmap_get(g)) return RES_FAIL;
     os_format f; memcpy(&f, fmt, sizeof f);
     dm_audio_input_stream *s = dm_audio_input_open(f.format, f.channels, f.rate, frames);
