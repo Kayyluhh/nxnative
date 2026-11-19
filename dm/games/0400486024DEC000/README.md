@@ -233,6 +233,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Payload outside the control section](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry) (resolved, 2026-11-18): the split since PR #2943 drops vertex key `ce0eba6c3584814d` at `AglShader.sharcb#BAHS@0x1b41cc`, which `pso_manifest.tsv` never names; the map was not split again with that change, so a build stopped at `the split shader tables differ from game profile 0400486024DEC000's`. The map is now the split's (v131072): 42,847 shaders, the later `vs_shader.bin` indices one lower; `shader_pairs.tsv`, `shader_facts.tsv` and `pso_pairs.tsv` were already the split's.
+
 - [Masked color targets store back during depth-only draws](../../../docs/reference/rendering.md#masked-color-targets-store-back-during-depth-only-draws). The depth prepass loaded a 1440×810 RG11B10F color target in eight passes per frame with all channels masked off. The author reported 35.5 MB/frame less attachment-store volume in the first A/B and 29.5 MB/frame less in the follow-up on an M2 MacBook Air. GPU and frame-time results were inconclusive. [PR #2771](https://github.com/seedds/nxnative/pull/2771)
 
   On an Apple M6 with macOS 27.2, the extracted fix saved 55.4 MiB of attachment stores at frame 3600 against `a3e5ec1e`, standing on the Kokiri Forest deck in docked mode. Seven 1920×1080 passes each dropped an 8,100 KiB color store. Both captures had 128 render passes and the same total attachment load bytes. Screenshots at frames 3000 and 3600 showed the same scene with moving leaves and fairies in different positions.
