@@ -612,4 +612,152 @@ class Adopt(unittest.TestCase):
         self.assertEqual(os.listdir(self.root), [])
 
 
+@unittest.skipIf(shader_cache.ZSTD is None, 'no zstd (Python 3.14 or backports.zstd)')
+class Compressed(unittest.TestCase):
+    """A compressed file (DMSH_CAS_ZSTD, --compress-shader-cache): every entry compressed as it is written, read back whole through every path, copied between kinds of file, and converted"""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name)
+        self.said = []
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def store(self, name='cas.db', **kw): return shader_cache.Store(self.root / name, self.said.append, **kw)
+
+    @staticmethod
+    def data(i, n=20000): return (f'shader {i} '.encode() * n)[:n]   # compressible, as MSL and libraries are
+
+    def fill(self, s, n=20, when=None):
+        for i in range(n): s.put(f'metallib/mac/{i:064x}.metallib', self.data(i), when)
+        s.put(f'shader/{D1}/mac/x_b.metal', self.data('src', 50000), when); s.put('index/k.json', b'{"a": 1}', when)
+
+    def stored(self, path):
+        db = sqlite3.connect(path)
+        try: return db.execute('SELECT count(*), sum(length(data)) FROM _blob_zstd').fetchone()
+        finally: db.close()
+
+    def test_a_new_file_starts_compressed_and_every_entry_is_written_so(self):
+        s = self.store(compress=True); self.fill(s); s.close()
+        n, size = self.stored(self.root / 'cas.db')
+        self.assertEqual(n, 22); self.assertLess(size, 20 * 20000 // 20)   # each entry its frame, not its bytes
+        s = self.store(compress=False)   # the file keeps its kind
+        try:
+            self.assertTrue(s.compressed)
+            for i in range(20): self.assertEqual(s.get(f'metallib/mac/{i:064x}.metallib'), self.data(i))
+            self.assertEqual(s.get('index/k.json'), b'{"a": 1}')
+            s.put('later', b'z' * 10000); self.assertEqual(s.get('later'), b'z' * 10000)
+        finally: s.close()
+        self.assertEqual(self.stored(self.root / 'cas.db')[0], 23)
+
+    def test_the_switch_makes_a_new_file_compressed_and_leaves_a_raw_one(self):
+        with mock.patch.dict(os.environ, {shader_cache.COMPRESS_ENV: '1'}):
+            s = self.store('new.db'); self.assertTrue(s.compressed); s.close()
+            raw = self.store('raw.db', compress=False); raw.put('a', b'a'); raw.close()
+            s = self.store('raw.db'); self.assertFalse(s.compressed); self.assertEqual(s.get('a'), b'a'); s.close()
+
+    def test_other_threads_read_whole_bytes(self):
+        s = self.store(compress=True); self.fill(s, 64)
+        try:
+            with cf.ThreadPoolExecutor(8) as pool:
+                got = list(pool.map(lambda i: s.get(f'metallib/mac/{i:064x}.metallib') == self.data(i), range(64)))
+            self.assertTrue(all(got)); self.assertTrue(s.readers)   # read on the threads' own connections
+        finally: s.close()
+
+    def test_sizes_are_the_stored_bytes_and_pruning_frees_them(self):
+        s = self.store(compress=True); self.fill(s, 4, when=1.0)
+        try:
+            n, size = s.slim(time.time())
+            self.assertEqual(n, 1); self.assertLess(size, 50000 // 10)   # the source and the index entry, as stored
+            self.assertIsNone(s.get(f'shader/{D1}/mac/x_b.metal')); self.assertEqual(s.get(f'metallib/mac/{0:064x}.metallib'), self.data(0))
+        finally: s.close()
+        self.assertEqual(self.stored(self.root / 'cas.db')[0], 4)
+
+    def test_take_between_every_kind_of_file(self):
+        for old_z in (False, True):
+            for new_z in (False, True):
+                with self.subTest(old=old_z, new=new_z):
+                    old = self.store(f'old{old_z}{new_z}.db', compress=old_z); self.fill(old, 5); old.close()
+                    new = self.store(f'new{old_z}{new_z}.db', compress=new_z)
+                    try:
+                        new.put(f'metallib/mac/{0:064x}.metallib', self.data(0))   # one it holds already
+                        self.assertEqual(new.take(self.root / f'old{old_z}{new_z}.db', 'metallib/'), 4)
+                        for i in range(5): self.assertEqual(new.get(f'metallib/mac/{i:064x}.metallib'), self.data(i))
+                        self.assertIsNone(new.get('index/k.json'))
+                    finally: new.close()
+
+    def test_older_generations_and_read_only_caches_of_either_kind(self):
+        old = self.store('cas-000000000000.db', compress=True); self.fill(old, 3); old.close()
+        name = f'metallib/mac/{1:064x}.metallib'
+        new = shader_cache.for_chain(self.root, '111111111111', self.said.append, compress=False)
+        try: self.assertEqual(new.get(name), self.data(1))   # copied in from the older, compressed generation
+        finally: new.close()
+        raw = sqlite3.connect(self.root / 'cas-111111111111.db')
+        try: self.assertEqual(raw.execute('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', (name,)).fetchone()[0], self.data(1))
+        finally: raw.close()
+        ro = self.store('regress.db', readonly=self.root / 'cas-000000000000.db')
+        try: self.assertEqual(ro.get(name), self.data(1))
+        finally: ro.close()
+
+    def test_code_without_the_functions_fails_instead_of_reading_frames(self):
+        s = self.store(compress=True); self.fill(s, 1); s.close()
+        db = sqlite3.connect(self.root / 'cas.db')
+        try:
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'zstd_decompress_col'):
+                db.execute('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob').fetchall()
+        finally: db.close()
+
+    def test_a_file_pr_2390_compressed_is_read_and_written(self):
+        p = self.root / 'cas.db'
+        db = shader_cache._functions(sqlite3.connect(p, isolation_level=None))   # PR #2390's layout: a raw-storing insert trigger, a row not yet compressed
+        for x in shader_cache.SCHEMA: db.execute(x)
+        db.execute('ALTER TABLE blob RENAME TO _blob_zstd'); db.execute('ALTER TABLE _blob_zstd ADD COLUMN _data_dict INTEGER')
+        db.execute('CREATE VIEW blob AS SELECT id,hash,zstd_decompress_col(data,0,_data_dict,1) AS data FROM _blob_zstd')
+        db.execute('CREATE TRIGGER blob_insert_trigger INSTEAD OF INSERT ON blob BEGIN INSERT INTO _blob_zstd(id,hash,data) VALUES(new.id,new.hash,new.data); END')
+        db.execute("INSERT INTO _blob_zstd(id, hash, data) VALUES(1, x'00', x'616263')"); db.execute("INSERT INTO entry VALUES('raw', 1, 1.0)")
+        db.execute("INSERT INTO _blob_zstd(id, hash, data, _data_dict) VALUES(2, x'01', ?, -1)", (shader_cache.pack(b'def' * 100),)); db.execute("INSERT INTO entry VALUES('z', 2, 1.0)")
+        db.close()
+        s = self.store()
+        try:
+            self.assertEqual(s.get('raw'), b'abc'); self.assertEqual(s.get('z'), b'def' * 100)
+            self.assertEqual(s.db.execute("SELECT sql FROM sqlite_master WHERE name='blob_insert_trigger'").fetchone()[0], shader_cache._INSERT)
+        finally: s.close()
+
+    def test_convert_both_ways_keeps_every_entry(self):
+        p = self.root / 'cas.db'
+        s = self.store(compress=False); self.fill(s, 30, when=12345.0); s.close()
+        def entries():
+            db = shader_cache._functions(sqlite3.connect(p))
+            try: return sorted(db.execute('SELECT e.name, e.mtime, b.data FROM entry e JOIN blob b ON b.id=e.blob').fetchall())
+            finally: db.close()
+        want = entries()
+        before, after = shader_cache.convert(p, True, self.said.append, workers=4)
+        self.assertLess(after, before); self.assertEqual(entries(), want)
+        self.assertIsNone(shader_cache.convert(p, True, self.said.append))   # already compressed
+        s = self.store()
+        try: self.assertTrue(s.compressed); s.put('new', b'n' * 5000); self.assertEqual(s.get('new'), b'n' * 5000)
+        finally: s.close()
+        shader_cache.convert(p, False, self.said.append, workers=2)
+        s = self.store()
+        try: self.assertFalse(s.compressed); self.assertEqual(s.get('new'), b'n' * 5000)
+        finally: s.close()
+        self.assertEqual([e for e in entries() if e[0] != 'new'], want)
+        self.assertEqual(sorted(os.listdir(self.root)), ['cas.db'])
+
+    def test_convert_is_refused_while_a_store_has_the_file_open(self):
+        s = self.store(compress=False); self.fill(s, 2)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'in use'): shader_cache.convert(self.root / 'cas.db', True, self.said.append)
+            self.assertEqual(s.get('index/k.json'), b'{"a": 1}')
+        finally: s.close()
+        self.assertFalse((self.root / 'cas.db.convert.part').exists())
+
+    def test_the_script_converts_a_build_folder(self):
+        cache = self.root / '0100000000000000_build/shader/cache'; cache.mkdir(parents=True)
+        s = shader_cache.Store(cache / 'cas-0123456789ab.db', self.said.append, compress=False); self.fill(s, 10); s.close()
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/compress_shader_cache.py'), str(self.root / '0100000000000000_build'), '--workers', '2'], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        s = shader_cache.Store(cache / 'cas-0123456789ab.db', self.said.append)
+        try: self.assertTrue(s.compressed); self.assertEqual(s.get(f'metallib/mac/{3:064x}.metallib'), self.data(3))
+        finally: s.close()
+
+
 if __name__ == '__main__': unittest.main()

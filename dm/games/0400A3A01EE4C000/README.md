@@ -45,6 +45,7 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 
 ## Found on this game
 
+- [A large map's compile cache took most of the build's disk](../../../docs/reference/packing.md#a-large-maps-compile-cache-took-most-of-the-builds-disk): the partial Mac build's cache (chain `cf3be507e0eb`, 10,090 keys) compresses from 5.73 to 1.87 GB with zstd level 3, measured read-only on 2026-11-18 in 10 s on 12 threads; `--compress-shader-cache` keeps it so from the first entry (current). A full build with it has not run yet (open).
 - [An iOS build stops when the profile has no prewarm seed list](../../../docs/reference/packing.md#an-ios-build-stops-when-the-profile-has-no-prewarm-seed-list): the framework packaging step required an optional recorded list (resolved).
 
 - [One compile for a pixel shader's side entry points](../../../docs/reference/shaders.md#one-compile-for-a-pixel-shaders-side-entry-points): 57% of the map's compiles were `_ba` and `_bl` libraries; a cold build of 1,021 shaders now takes 48% of the CPU on the Mac's flags and 47% on the iPhone's.
