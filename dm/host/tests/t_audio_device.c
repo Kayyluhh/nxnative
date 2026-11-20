@@ -54,7 +54,7 @@ static struct {
     AudioUnitPropertyListenerProc device_listener, format_listener;
     unsigned writes, disposals, input_formats;
     OSStatus init_error;
-    int route_ch;                        // the device's output stream format channels (the route)
+    _Atomic int route_ch;                // the device's output stream format channels (the route); the fixture changes it while queued route checks may read it
     int speakers;                        // its speaker configuration: SPK_NONE (no layout), SPK_PAIR (an interface: 1 and 2 left and right, the rest unlabelled), SPK_51_TAG, SPK_51_BITMAP
     int format_ch;                       // channels of the unit's input format, as last set
     AudioChannelLayoutTag layout_tag;    // the unit's input channel layout, as last set (0: none)

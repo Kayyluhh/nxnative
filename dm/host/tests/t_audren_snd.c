@@ -25,6 +25,7 @@ void *guest_sym(const char *name) {
     if (strstr(name, "ReleaseVoiceSlot") || strstr(name, "ReleaseMemoryPool")) return (void *)f_void2;
     return NULL;
 }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 void *objmap_get(const void *key) { (void)key; return NULL; }
 void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
