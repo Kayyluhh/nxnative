@@ -741,11 +741,16 @@ static void (^g_fs_failed)(void);
 @interface DmWinDelegate : NSObject <NSWindowDelegate> @end
 @implementation DmWinDelegate
 - (void)windowDidFailToEnterFullScreen:(NSWindow *)w { (void)w; if (g_fs_failed) g_fs_failed(); }
-// Fullscreen hides the menu bar and the Dock for good. AppKit's default auto-hide still brought the menu bar over the picture on macOS 27 with two screens,
-// whenever the game was the active app. ⌃⌘F and ⌘Q still work without the bar shown. HideMenuBar requires HideDock (NSApplication presentationOptions rules)
+// The menu bar in fullscreen (DM_FULLSCREEN_MENUBAR, the settings window's Menu bar in fullscreen): auto (the default) is AppKit's auto-hide, the bar and the Dock shown
+// when the pointer reaches their edge (the Cheats menu, leaving fullscreen); hide hides both for good (PR #2850). Auto-hide brought the menu bar over the picture on macOS 27
+// with two screens whenever the game was the active app; on one screen it does not (docs/reference/services.md). With hide, ⌃⌘F and ⌘Q still work. HideMenuBar requires HideDock
+// (NSApplication presentationOptions rules). Read at each entry, so a change takes effect at the next one
 - (NSApplicationPresentationOptions)window:(NSWindow *)w willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposed {
     (void)w; (void)proposed;
-    return NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+    const char *e = getenv("DM_FULLSCREEN_MENUBAR");
+    if (e && !strcmp(e, "hide")) return NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+    if (e && *e && strcmp(e, "auto")) { static int said; if (!said++) LOG("[RED] DM_FULLSCREEN_MENUBAR=%s: auto or hide; keeping auto", e); }
+    return NSApplicationPresentationFullScreen | NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar;
 }
 @end
 
@@ -1813,7 +1818,7 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
-        static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;   // also for fullscreen entered later (⌃⌘F, the green button): no menu bar over the game
+        static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;   // also for fullscreen entered later (⌃⌘F, the green button): the menu bar as DM_FULLSCREEN_MENUBAR asks
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
