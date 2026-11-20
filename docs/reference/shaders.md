@@ -4,6 +4,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### EA BIG4, EASF and NXSHADER archives
+
+- **Symptom:** the shader splitter cannot reach an EA title's shader programs inside its BIG4 archives. A reader that imports PyCryptodome only on encountering EASF instead fails late in a clean tool environment.
+- **Cause:** these archives wrap NXSHADER programs in chunkzip raw-deflate blocks and EASF AES-CBC encryption. Existing Frostbite readers use different layouts. EASF's eight-byte ID identifies an `id[8], key[16]` registry entry in the matching main NSO; the header verifies the first 32 plaintext bytes.
+- **Fix:** `easf` reads members by signature, validates ranges and decoded sizes, finds and verifies the registry key, and passes control/code records to normal package, fact and pairing generation. Archive jobs use their version's main, with the newest main for DLC, and the normal worker/unreadable-file path. CBC decryption shares `dm/tools/aes.py` with the existing Unreal and RPF6 ECB readers, so no extra Python crypto dependency is introduced.
+- **Check:** synthetic fixtures cover key discovery, bad candidates, compressed NSOs, archive bounds, compute offsets, version separation, DLC, directory/image IO and package export while PyCryptodome is unavailable. Independent AES known-answer vectors and existing encrypted Unreal/RPF6 fixtures check the shared helper. The current-main split of FIFA 23 reproduces all 386 expected shader keys and its full Mac shader build succeeds.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), [PR #1696](https://github.com/seedds/nxnative/pull/1696).
+
+### Telltale effect packs in ttarch2 archives
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`, with `shaders: 0`, on a Telltale Tool game whose RomFS is `.ttarch2` archives and whose `main` names `*.t3fxpack`. No BNSH, BAHS or control-section magic appears in the compressed files.
+- **Cause:** the archives use `NCTT` or `ZCTT` wrappers. A `ZCTT` block has version `0x10000`, a chunk count and `count + 1` 64-bit offsets, followed by raw-deflate chunks. The effect packs contain unaligned records: a code area, a 32-bit control length, then the control section. Compute code areas can be headerless. Existing BNSH and whole-GLSLC readers cannot reach these records.
+- **Fix:** `ttarch2_shaders` detects the wrapper by magic, checks compressed-block ranges and inflates shader archives identified by `.t3fxpack` in their initial directory data. It takes the code area immediately before each control-length word and retains only pairs accepted by `glslc_stage` and `check()`. No title, build or profile switch selects the reader.
+- **Check:** `test_ttarch2.py` covers deflate chunks, both wrappers, unaligned and headerless compute records, inconsistent control lengths, non-shader archives and file-scanner dispatch with the original shader bytes preserved. A real-archive A/B check against the pre-integration splitter finds zero keys without the reader and 24,243 with it; the keys exactly match [PR #1965](https://github.com/seedds/nxnative/pull/1965).
+- **Found on:** [Sam & Max: The Devil's Playhouse 1.8.0](../../dm/games/0100D5501857E000/README.md), a provisional Mac profile with a successful user playtest; episode completion and save/reload remain unvalidated.
+
 ### RenderDragon material shaders
 
 - **Symptom:** the packer finds no loose SPIR-V files, although the game creates its modules from assets it ships.
@@ -168,7 +184,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** an entry that lies inside a control section another entry names, measured by that section's own length (`ctl_len`, 0x48 key bytes for NVN2) rather than the length an entry claims, is dropped. Whether a false entry's section is genuine does not matter, as its first 0x48 bytes are a real control section.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six such shaders in `agl_common`, `agl_technique`, `agl_technique_pfx` and `tera_common`, none of them ever loaded; one failed the build. `tera_common` gave 175 variation pairs once its false entry was gone. [Splatoon Raiders](../../dm/games/0400380020056000/README.md): the same three agl keys (`68bbe98b3bfd9876`, `18be578dfdaaffa0`, `7a4936fccf82094e`), dropped when its tables were split again ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) was split again too and holds no such entry: its tables did not change. [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): one compute shader in `agl_common` (`797e77c2ec4341c5`), dropped from its tables ([issue #1592](https://github.com/seedds/nxnative/issues/1592)).
 - **Payload outside the control section:** descriptor-shaped words can also lie after a control section, beyond the control-span exclusion. A nonempty binary record array that fits before the code region and agrees with the scan supplies the entry offsets for both shader selection and variation pairing. The split drops candidates outside those record entry slots. An unrecognized or inconsistent array leaves the scan candidates unchanged.
-- **Also found on:** [Mario Kart World 1.8.0](../../dm/games/0400C3F00006E000/README.md#180), [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) and [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), whose map was not split again with the change, so its builds stopped at the split's table check until it was.
+- **Also found on:** [Mario Kart World 1.8.0](../../dm/games/0400C3F00006E000/README.md#180), [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) and [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 - **Check:** `dm/tools/tests/test_split_bahs_entries.py` uses synthetic fixtures for control words, payload outside entry slots, and scan fallback for inconsistent arrays, including empty arrays and arrays overlapping code.
 
 ### Zstd files recognised by their magic
@@ -229,6 +245,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): 257 whole GLSLC outputs in the engine's technique files (`*.tec`: `resources_nx/release/master/shader/*.tec`, magic `TEC\0`, each output whole after a table of parameter names) beside 49 in `main`.
   - [Absolum](../../dm/games/0100A83022A22000/README.md): 163 GLSLC outputs in `shaders.nx.bin` (`rom:/shaders.nx.bin`: a u32 count, then per entry a u32 hash, a u32 size and one whole output): 162 unique shaders, 83 pixel and 79 vertex, every vertex shader paired with the single-stage cover ([Single-stage programs paired with a cover](#single-stage-programs-paired-with-a-cover)). Its `.xnb` effects are XNA's D3D9 effects, MOJOSHADER linked in, which the GPU does not run.
   - [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): 3,050 loose files in `data/shaders_binary` (`*.vs` / `*.ps`, one stage each, one output per file), read like FINAL FANTASY TACTICS' technique files; its vertex shaders are in two parts ([VertexA and VertexB parts merged into one vertex shader](#vertexa-and-vertexb-parts-merged-into-one-vertex-shader)).
+
+### SHARC archives in GIANTS Engine
+
+- **Symptom:** the shader split finds no shaders in main or the RomFS, which keeps them in `shared/shader_switch.sharc`.
+- **Cause:** SHARC v11 (`RAHS`) puts three entry tables after its `0x2c`-byte header, then the metadata and shader payloads. Each shader member contains one GLSLC output compressed with raw LZMA1, preceded by a five-byte property and dictionary header.
+- **Fix:** `shader_split.py` (`sharc_shaders`) checks the table and member spans, including the side records and length-prefixed names. The LZMA members omit end markers, so the reader checks each decoded GLSLC output against its declared length and requires it to pass the GLSLC parser. A short member fails the archive read even if earlier members decoded.
+- **Found on:** [Farming Simulator 26: Nintendo Switch Edition](../../dm/games/0100D440269E8000/README.md), update 1.0.1.0. Removing one to eight bytes from the final compressed member left its GLSLC output short even when the compressed size was adjusted to match.
 
 ### GLSLC outputs holding several stages
 
@@ -1079,7 +1102,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Integer textures and images through float declarations keep their bits
 
-- Integer textures and images read and written through float declarations (an `RGBA8_UINT` texture read by `texture3d<float>` and bit-cast, `R16_UINT` / `R32_UINT` buffers through `texture_buffer<float>`, integer stores into a float-declared `texture3d` image) were checked on an Apple GPU: all keep the integer bits, so they need no facts.
+- These accesses kept their integer bits on the Apple GPU used in the original check. Metal leaves a mismatch between texture format and shader type undefined. The host adapts supported 32-bit integer buffer image formats to matching float views. See [Float views for integer buffer images](rendering.md#float-views-for-integer-buffer-images).
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the volumetric lightmap's indirection texture, the light grid buffers).
 
 ### Integer-typed vertex inputs fed normalized formats
@@ -2167,6 +2190,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** the host's network rounds each HMMA's f16 accumulator once per 8 products, as the translated helper does since [HMMA rounds its f16 accumulator once per 8 products](#hmma-rounds-its-f16-accumulator-once-per-8-products) (resolved; before that both rounded after every product, as `simdgroup_half8x8` does, and differed from the Switch in the low bits of most HMMAs). The host's network follows the helper, and `test_ndve_engine.py` fails when the two differ.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate): its title and opening movies ([issue 1375](https://github.com/seedds/nxnative/issues/1375), PR #1894).
 
+### An interrupted compute compile broke the NDVE sequence
+
+- **Symptom:** green and grey striped blocks over the opening movie after `XPC_ERROR_CONNECTION_INTERRUPTED`. The host logs `[RED] NDVE engine: a dispatch out of the network's order` and disables the engine for the rest of the run.
+- **Cause:** when Apple's `MTLCompilerService` died, NVN dispatch cached the interrupted compute compile as a permanent failure. The dispatch returned before the NDVE engine saw the layer, so the next layer looked out of order. The game's fallback then ran with the same dispatch missing.
+- **Fix:** recognized NDVE dispatches reach the engine after resource preparation and before the translated pipeline lookup. If the engine falls back, the host leaves interrupted compiles retryable on a later dispatch and caches permanent refusals.
+- **Check:** `t_dispatch_pipeline` injects the Metal error through the real dispatch path, checks that the next fallback dispatch writes its result, and checks that NDVE advances through the two reported layers without asking Metal for the first layer's fallback.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), on an M2 MacBook Air on macOS 27.0 ([issue #2920](https://github.com/seedds/nxnative/issues/2920)).
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.
@@ -2360,6 +2391,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_raw_noinline.py` covers inline mesh code, already-rewritten inputs used by composed mesh libraries, unchanged non-mesh stages, idempotence and a real Metal compile. Offline verification exports every full manifest row through the production host, retaining differing descriptors even when rows share a shader triple; the linked game note records its coverage and results.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), the later M1/M2 reports in [#2825](https://github.com/seedds/nxnative/issues/2825) and [#2911](https://github.com/seedds/nxnative/issues/2911).
 - **Remaining:** affected-device retests are recorded in the game note. [Recovery of archives poisoned before the host fix](rendering.md#an-archive-period-written-after-the-compiler-service-died) remains separate; this workaround changes no host recovery or serialization.
+
+### Inlining mesh helpers with subgroup inputs can crash the Metal compiler
+
+- **Symptom:** a native mesh pipeline fails to compile with `XPC_ERROR_CONNECTION_INTERRUPTED`. The compiler report shows SIGBUS at `llvm::MachineOperand::setReg` under the mesh backend. In-flight compiles in the same service can also fail.
+- **Cause:** SPIRV-Cross's translated helpers and the generated stage body are forced into the mesh entry points at `-O1`. Relaxing that policy cleared the failure on an M2 Pro with macOS 27.0.1. Ordinary inlining still reproduced it offline at the 26.6 minimum. Forcing only the stage body out of line cleared the isolated row, with failures elsewhere in the batch. Forcing only the helpers that take subgroup inputs out of line cleared the entire batch. The earlier raw-search failure shares a backend stack signature. The relationship between the internal defects is unknown.
+- **Fix:** `mesh_subgroup_noinline` marks SPIRV-Cross's multiline helpers with `gl_Subgroup*` parameters `noinline` in final native mesh stages. It changes only those declarations, so the generated stage body and raw search stay forced inline. This is a workaround for Apple's backend.
+- **Check:** `test_dmsh_raw_noinline.py` checks that the rewrite selects the subgroup helper and preserves the raw search, stage body and other helpers. The isolated foliage pipeline reproduces the original SIGBUS in the offline backend on `g14s` at minimum 26.6. The subgroup helper rewrite clears the isolated pipeline and all 164 rows on the five checked targets.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), from [d4kine's isolation in PR #3069](https://github.com/seedds/nxnative/pull/3069).
 
 ### 128-bit raw global loads read one word at a time
 
