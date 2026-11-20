@@ -324,6 +324,18 @@ static void test_route_speakers(void) {
     unit.route_ch = 2; assert(dm_audio_output_channels() == 2);   // a 5.1 configuration on a two-channel stream is still two
     unit.speakers = SPK_NONE; assert(dm_audio_output_channels() == 2);
 }
+// The player's Sound output (DM_AUDIO_CHANNELS): Stereo holds a 5.1 system at two; 5.1 takes an interface with no surround speakers configured as six, but not a stereo
+// stream (a six-channel unit there keeps only the front pair); anything else follows the route
+static void test_route_choice(void) {
+    unit.route_ch = 6; unit.speakers = SPK_51_TAG;
+    setenv("DM_AUDIO_CHANNELS", "2", 1); assert(dm_audio_output_channels() == 2);
+    setenv("DM_AUDIO_CHANNELS", "auto", 1); assert(dm_audio_output_channels() == 6);
+    unit.route_ch = 34; unit.speakers = SPK_PAIR; assert(dm_audio_output_channels() == 2);
+    setenv("DM_AUDIO_CHANNELS", "6", 1); assert(dm_audio_output_channels() == 6);
+    unit.speakers = SPK_NONE; assert(dm_audio_output_channels() == 6);
+    unit.route_ch = 2; assert(dm_audio_output_channels() == 2);
+    unsetenv("DM_AUDIO_CHANNELS"); assert(dm_audio_output_channels() == 2);
+}
 static void test_sink_route(void) {
     unit.route_ch = 2; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
     void *key = dm_pcmout_open_sink(); aout *a = ao(key);
@@ -355,6 +367,7 @@ int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
     test_route_without_output();
     test_route_speakers();
+    test_route_choice();
     unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096}; unit.frames = 512;
     uint32_t out[16] = {0}; uint8_t prm[16]; h_au_InitParam(prm);
     check_open_publication = 1;

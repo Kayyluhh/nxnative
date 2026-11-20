@@ -12,6 +12,7 @@ DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; re
 DM_AUDIO_CAPTURE	test	`=<file>`: `tests/t_audio_live.c` records the output device's input (a loopback device such as BlackHole) there as 32-bit float samples, for `dm/tools/audio_channel_check.py`
 DM_AUDIO_CAPTURE_CH	test	`=<n>`: the channels `tests/t_audio_live.c` records with `DM_AUDIO_CAPTURE` (6 by default)
 DM_AUDIO_CAPTURE_DEVICE	test	`=<part of a device name>`: `tests/t_audio_live.c` records that device instead of the one playing at start (the target of a switch)
+DM_AUDIO_CHANNELS	player	The launcher's Sound output: `2` plays stereo on every output (a six-channel game is told of two and folded by the host); `6` plays 5.1 on an output with six or more channels whatever its speaker configuration (Audio MIDI Setup); `auto` or unset follows the output (`hle_audio.c` `dm_audio_output_channels`)
 DM_AUDIO_DEVICE	diagnostic	`=<part of a device name>` (Mac) plays the audio on the output device with that name (a virtual device such as BlackHole 16ch, for tests); the default output otherwise
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
 DM_AUDIO_LIVE_PCM	test	`=<file>`: `tests/t_audio_live.c` plays that file (16-bit, 48 kHz, six channels interleaved in the guest's order) instead of its test tones

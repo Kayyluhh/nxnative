@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Screen upscaling](#screen-upscaling), [3D upscaler](#3d-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Screen upscaling](#screen-upscaling), [3D upscaler](#3d-upscaler), [Game language](#game-language), [Picture](#picture), [Sound output](#sound-output), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -96,6 +96,14 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 ### Picture shape
 
 Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
+
+### Sound output
+
+**Automatic**, the default, plays 5.1 surround when your output has surround speakers and stereo otherwise. On a Mac that means an output of six or more channels whose speaker setup (Audio MIDI Setup, **Configure Speakers**) has a center and surround speakers, such as HDMI to a 5.1 receiver; an audio interface with many outputs but only a left and right pair plays stereo.
+
+- **Stereo:** the game mixes for two speakers on every output, also on a 5.1 system.
+- **5.1 surround:** the game mixes for six channels on any output with six or more, whatever its speaker setup says. An output with fewer channels stays stereo.
+- **When to change it:** when a game sounds faint, far away or missing voices (it mixed for 5.1 on speakers that are only a pair, choose Stereo), or when a surround system plays in stereo (choose 5.1). The game log's `audio output route` line names the output and what the app plays.
 
 ### Frame-rate counter
 

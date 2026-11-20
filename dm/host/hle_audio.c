@@ -386,6 +386,13 @@ static int device_has_surround(AudioDeviceID d) {
 static _Atomic int g_route;
 static pthread_mutex_t g_route_mu = PTHREAD_MUTEX_INITIALIZER;
 static void route_notify(void *unused) { (void)unused; dm_audio_device_changed(); }
+// The player's Sound output (DM_AUDIO_CHANNELS, the launcher's setting): 2 plays stereo on every route, the game told of two channels and a six-channel output folded by the
+// host; 6 plays 5.1 on any output with six or more channels, whatever its speaker configuration says (an interface with no speaker layout set, a receiver that reports none);
+// unset or auto follows the route. A route of fewer than six channels stays stereo under 6: a six-channel unit on it would keep only the front pair (pull_device)
+static int channels_choice(void) {
+    const char *e = getenv("DM_AUDIO_CHANNELS");
+    return e && !strcmp(e, "2") ? 2 : e && !strcmp(e, "6") ? 6 : 0;
+}
 #if !TARGET_OS_IPHONE
 static AudioDeviceID g_route_device;
 static OSStatus route_device_changed(AudioObjectID id, UInt32 n, const AudioObjectPropertyAddress *pa, void *ctx) {
@@ -399,9 +406,9 @@ static void route_listen(void) {
 #endif
 int dm_audio_output_channels(void) {
     pthread_mutex_lock(&g_route_mu);
-    int device_changed = 0;
+    int device_changed = 0, choice = channels_choice();
 #if TARGET_OS_IPHONE
-    int ch = dm_ios_output_channels() >= 6 ? 6 : 2;
+    int ch = choice != 2 && dm_ios_output_channels() >= 6 ? 6 : 2;
 #else
     static pthread_once_t listener = PTHREAD_ONCE_INIT; pthread_once(&listener, route_listen);
     AudioDeviceID device = out_device();
@@ -419,14 +426,15 @@ int dm_audio_output_channels(void) {
         device_changed = g_route_device != 0; g_route_device = device;
     }
     char name[256]; int n = device_out_channels(device, name, sizeof name);
-    int surround = n >= 6 && device_has_surround(device);
-    int ch = surround ? 6 : 2;
+    int speakers = n >= 6 && (choice == 6 || device_has_surround(device));   // the speaker configuration is not read when the player chose 5.1
+    int ch = choice != 2 && speakers ? 6 : 2;
 #endif
     int old = atomic_exchange(&g_route, ch);
 #if !TARGET_OS_IPHONE
     if (ch != old || device_changed)
-        LOG("audio output route: \"%s\" has %d channels%s, the host plays %s", name, n,
-            n >= 6 && !surround ? " but no center and surround speakers in its speaker configuration" : "", ch == 6 ? "six (5.1)" : "stereo");
+        LOG("audio output route: \"%s\" has %d channels%s, the host plays %s%s", name, n,
+            n >= 6 && !speakers ? " but no center and surround speakers in its speaker configuration" : "", ch == 6 ? "six (5.1)" : "stereo",
+            choice == 2 ? " (Sound output: Stereo)" : choice == 6 ? (ch == 6 ? " (Sound output: 5.1)" : " (Sound output 5.1 needs six channels)") : "");
 #endif
     // Signaling a kernel event takes the guest scheduler lock. Do it off the AudioUnit/registry locks,
     // after the cache is published, so a woken game reads the new count without a lock-order cycle.
