@@ -13,7 +13,7 @@
 #     the host sets the pushed bytes there (Super Mario Galaxy: 54 of its 56 built-in shaders have one)
 #   · compute shaders are translated as kernels; their local size is stored as comp:x,y,z, since Metal takes the threadgroup size at dispatch
 #     (Re:ZERO skins its characters and builds its light clusters in compute); specialization-constant local sizes are skipped
-#   · stages other than vertex, fragment and compute are skipped and counted: Metal has no geometry shaders (Super Mario Galaxy has 2)
+#   · triangle pass-through geometry stages that only route an instance to a viewport are folded into the vertex stage; other geometry stages are skipped and counted
 #   · descriptor sets move to argument buffers only when combined per-stage bindings exceed Metal's limits; the table gives the Metal ID of each array's first element
 #   · a fragment shader with only outputs 0 and 1 of the same type gets a variant vk_<key>_d with [[color(0), index(1)]]: Super Mario Galaxy's GX shaders write
 #     the second blend source at location 1 (no Index decoration), which NVIDIA's hardware feeds to dual-source blending; the host picks the variant for pipelines
@@ -21,21 +21,28 @@
 # Super Mario Galaxy generates its GX shaders at run time; they come from a capture folder (the Mac host's DM_VK_CAPTURE), read like a RomFS: every input folder is
 # searched for SPIR-V files by their magic
 # Output: <out>/vk/vk_shaders.metallib and <out>/vk/vk_shaders.tsv; --ios <dir> also writes <dir>/vk/ with an iPhone library (same table)
-# Table rows: key <TAB> stage (vert / frag / comp:x,y,z) <TAB> resources, space-separated kind:set.binding=slot[*count]; lower-case u/b/t/s/c/p bind discrete buffers, textures, samplers and push constants;
+# Table rows: key <TAB> stage (vert / frag / comp:x,y,z / geomvp:location) <TAB> resources, space-separated kind:set.binding=slot[*count]; lower-case u/b/t/s/c/p bind discrete buffers, textures, samplers and push constants;
 #   upper-case U/B/T/S are argument-buffer members, with @id after the slot and count for the first element's Metal ID;
 #   o maps a dynamic buffer's set.binding to an offset index, and q gives that offset buffer's Metal slot
-# Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
+#   a RenderDragon vertex shader with an unsigned bone-index variant vk_<key>_u adds the input location in column 5
+# Usage: vk_shaders.py <SPIR-V dir | NSO>... <out dir> [--ios <dir>]
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
+import nso
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
 MAGIC = 0x07230203
+SPIRV_MAGIC = struct.pack('<I', MAGIC)
+MATERIAL_MAGIC = struct.pack('<Q', 0x0A11DA1A)
+BGFX_SHADER = re.compile(rb'[VF]SH\x05|CSH\x03')
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
 DEC_ARRAY_STRIDE, DEC_BINDING, DEC_SET = 6, 33, 34
+DEC_BUILTIN, DEC_LOCATION = 11, 30
+POSITION, INSTANCE_INDEX, VIEWPORT_INDEX = 0, 43, 10
 KINDS = {'ubos': 'u', 'ssbos': 'b', 'separate_images': 't', 'images': 't', 'separate_samplers': 's', 'textures': 'c'}
 SLOT_CLASS = {'u': 'buffer', 'b': 'buffer', 't': 'texture', 's': 'sampler', 'c': 'texture', 'p': 'buffer'}
 # Metal Feature Set Tables, buffers 0–30, textures 0–30 (Apple2/3 minimum), samplers 0–15: https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
@@ -48,12 +55,71 @@ PRECISE = re.compile(r'\bfast::(min|max|clamp)\(')
 
 def red(msg: str) -> NoReturn: sys.exit('[RED] ' + msg)
 
-def spirv_files(root):
+def whole_module(data, start, end):
+    if end > len(data) or end - start < 24 or (end - start) % 4: return False
+    if data[start:start + 4] != SPIRV_MAGIC or struct.unpack_from('<I', data, start + 16)[0]: return False
+    pos = start + 20
+    while pos < end:
+        words = struct.unpack_from('<I', data, pos)[0] >> 16
+        if not words: return False
+        pos += words * 4
+    return pos == end
+
+
+def bgfx_modules(data):
+    """Read the size-delimited SPIR-V payload of a bgfx v5 graphics or v3 compute shader."""
+    for match in BGFX_SHADER.finditer(data):
+        pos = match.end() + 4   # shader I/O hash
+        if pos + 2 > len(data): break
+        uniforms = struct.unpack_from('<H', data, pos)[0]; pos += 2
+        for _ in range(uniforms):
+            if pos >= len(data): break
+            pos += 7 + data[pos]   # name length, name, type, element count, register index and count
+        if pos + 4 > len(data): continue
+        size = struct.unpack_from('<I', data, pos)[0]
+        start, end = pos + 4, pos + 4 + size
+        if whole_module(data, start, end): yield start, bytes(data[start:end])
+
+
+def shader_inputs(root):
+    if os.path.isfile(root):   # explicit ExeFS input for built-in shaders
+        with open(root, 'rb') as f:
+            if f.read(4) == b'NSO0': yield root, 'nso'
+        return
     for d, _, fs in os.walk(root):
         for f in sorted(fs):
             p = os.path.join(d, f)
-            with open(p, 'rb') as fh: head = fh.read(4)
-            if len(head) == 4 and struct.unpack('<I', head)[0] == MAGIC: yield p
+            with open(p, 'rb') as fh: head = fh.read(8)
+            if head.startswith(SPIRV_MAGIC): yield p, 'spirv'
+            elif head == MATERIAL_MAGIC: yield p, 'material'
+
+
+def embedded_modules(path, kind):
+    with open(path, 'rb') as f: data = f.read()
+    if kind == 'nso': data = nso.load(data, path).image
+    yield from bgfx_modules(data)
+
+
+def spirv_files(root):
+    for path, kind in shader_inputs(root):
+        if kind == 'spirv' or next(embedded_modules(path, kind), None) is not None: yield path
+
+
+def spirv_sources(roots):
+    seen = set()
+    for root in roots:
+        if not os.path.exists(root): red(f'{root}: no such file or folder')
+        for path, kind in shader_inputs(root):
+            name = os.path.basename(path) if kind == 'nso' else '/' + os.path.relpath(path, root)
+            if kind == 'spirv':
+                with open(path, 'rb') as f: modules = [(None, f.read())]
+            else:
+                modules = embedded_modules(path, kind)
+            for offset, data in modules:
+                key = hashlib.sha256(data).hexdigest()[:16]   # of the game's words, which the host hashes
+                if key in seen: continue
+                seen.add(key)
+                yield key, name if offset is None else f'{name}@{offset:#x}', data
 
 def decorations(words):
     """variable id → {'set': n, 'binding': n, 'binding_at': word index of the binding value}"""
@@ -87,16 +153,199 @@ def fix_strides(words):
     if not add: return words
     return words[:at] + [w for t, s in add.items() for w in ((4 << 16) | OP_DECORATE, t, DEC_ARRAY_STRIDE, s)] + words[at:]
 
+def unsigned_bone_indices(src):
+    """RenderDragon's scalar a_indices as an unsigned fetch, widened to int before the shader uses it."""
+    attribute = re.search(r'\bint(\s+a_indices\s*\[\[attribute\((\d+)\)\]\];)', src)
+    stage_in = re.search(r'\b(\w+)\s*\[\[stage_in\]\]', src)
+    if not attribute or not stage_in: return None
+    value = re.escape(stage_in[1]) + r'\.a_indices\b'
+    src = src[:attribute.start()] + 'uint' + src[attribute.start() + 3:]
+    variant, uses = re.subn(r'\b' + value, lambda m: f'int({m[0]})', src)
+    if not uses: return None
+    return attribute[2], variant
+
+
 def entry_args(src, key, path):
     """Find the translated entry point with its argument list in group 1."""
     m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
     if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
     return m
 
-def one(path, tmp, root):
-    with open(path, 'rb') as f: data = f.read()
+def spv_ops(words):
+    i = 5
+    while i < len(words):
+        op, n = words[i] & 0xffff, words[i] >> 16
+        if not 0 < n <= len(words) - i: red('malformed SPIR-V instruction length')
+        yield op, tuple(words[i + 1:i + n])
+        i += n
+
+def entry_interface(entry):
+    # The null-terminated entry-point name occupies whole words between the function and interface IDs.
+    return entry[next(i for i in range(2, len(entry)) if 0 in entry[i].to_bytes(4, 'little')) + 1:]
+
+def geometry_viewport(words):
+    """Prove that the geometry stage emits the three input vertices in order, forwarding every output.
+
+    Treat each input element as a distinct symbolic value and run only the SPIR-V operations needed for
+    copying values and traversing a constant-bound loop. A data-dependent branch or any other operation
+    defeats the proof. The result is the location the geometry shader copies to ViewportIndex.
+    """
+    ops = list(spv_ops(words))
+    entry, = (a for op, a in ops if op == 15)   # OpEntryPoint; one() checked there is exactly one
+    func = entry[1]
+    modes = {a[1:] for op, a in ops if op == 16 and a[0] == func}
+    # Triangles, OutputTriangleStrip, OutputVertices 3, Invocations 1; no other execution modes.
+    if modes - {(0, 1)} != {(22,), (29,), (26, 3)}: return None
+    if [a[1] for op, a in ops if op == 54] != [func]: return None   # one OpFunction
+    if any(op == 17 and a not in ((1,), (2,), (57,)) for op, a in ops): return None   # Shader, Geometry, MultiViewport
+    if any(op in (10, 331, 332) for op, _ in ops): return None   # extensions, ExecutionModeId, DecorateId
+    dec = {}
+    for op, a in ops:
+        if op == OP_DECORATE:
+            if len(a) != 3 or a[1] not in (DEC_BUILTIN, DEC_LOCATION) or a[0] in dec: return None
+            dec[a[0]] = a[1:]
+    ints = {a[0] for op, a in ops if op == 21 and a[1] == 32}   # OpTypeInt
+    uints = {a[0] for op, a in ops if op == 21 and a[1:] == (32, 0)}
+    scalars = ints | {a[0] for op, a in ops if op == 22 and a[1] == 32}
+    varyings = scalars | {a[0] for op, a in ops if op == 23 and a[1] in scalars}
+    vals = {a[1]: a[2] for op, a in ops if op == 43 and a[0] in ints}
+    ptr_types = {a[0]: a[1:] for op, a in ops if op == 32}   # OpTypePointer
+    arrays = {a[0]: a[1] for op, a in ops if op == 28 and vals.get(a[2]) == 3}
+    variables = {a[1]: a[0] for op, a in ops if op == 59 and a[2] != 7}   # OpVariable outside Function
+    inputs, outputs, memory = {}, {}, {}
+    if set(variables) != set(entry_interface(entry)): return None
+    for var, ty in variables.items():
+        if var not in dec: return None
+        storage, ty = ptr_types[ty]
+        if storage == 1 and ty in arrays and arrays[ty] in varyings:
+            if dec[var] in inputs: return None
+            inputs[dec[var]] = arrays[ty], var
+            memory[var] = tuple(object() for _ in range(3))
+        elif storage == 3 and ty in varyings:
+            if dec[var] in outputs: return None
+            outputs[dec[var]] = ty, var
+        else: return None
+    position, viewport = (DEC_BUILTIN, POSITION), (DEC_BUILTIN, VIEWPORT_INDEX)
+    if position not in outputs or outputs.get(viewport, (None,))[0] not in uints: return None
+    forwarded = {}
+    for d, (ty, var) in outputs.items():
+        if d == viewport: continue
+        if d != position and d[0] != DEC_LOCATION: return None
+        if d not in inputs or inputs[d][0] != ty: return None
+        forwarded[var] = memory[inputs[d][1]]
+    routes = {d[1]: memory[var] for d, (ty, var) in inputs.items() if d[0] == DEC_LOCATION and d[1] < 32 and d not in outputs and ty in uints}
+    if not routes: return None
+    target = outputs[viewport][1]
+
+    body = ops[next(i for i, (op, _) in enumerate(ops) if op == 54) + 1:]
+    labels = {a[0]: i for i, (op, a) in enumerate(body) if op == 248}
+    pointers = {v: (v, ()) for v in variables}
+    locals_ = set()
+    route, emitted, ended = None, 0, False
+    pc, block, prev = 0, None, None
+    try:
+        for _ in range(256):   # a proof never runs indefinitely on a foreign shader
+            op, a = body[pc]
+            pc += 1
+            if op == 248:   # OpLabel; resolve consecutive OpPhi in parallel
+                prev, block = block, a[0]
+                phis = {}
+                while body[pc][0] == 245:
+                    phi = body[pc][1]
+                    phis[phi[1]] = vals[dict(zip(phi[3::2], phi[2::2]))[prev]]
+                    pc += 1
+                vals.update(phis)
+            elif op == 59:
+                if len(a) != 3 or a[2] != 7: return None
+                locals_.add(a[1])
+                pointers[a[1]] = a[1], ()
+            elif op == 65:   # OpAccessChain
+                base, indices = pointers[a[2]]
+                pointers[a[1]] = base, indices + tuple(vals[i] for i in a[3:])
+            elif op == 61:   # OpLoad
+                if len(a) != 3: return None
+                base, indices = pointers[a[2]]
+                value = memory[base]
+                for i in indices: value = value[i]
+                vals[a[1]] = value
+            elif op == 62:   # OpStore: whole locals and outputs only
+                if len(a) != 2 or (a[0] not in locals_ and a[0] != target and a[0] not in forwarded): return None
+                memory[a[0]] = vals[a[1]]
+            elif op == 80:   # OpCompositeConstruct
+                vals[a[1]] = tuple(vals[i] for i in a[2:])
+            elif op == 81:   # OpCompositeExtract
+                value = vals[a[2]]
+                for i in a[3:]: value = value[i]
+                vals[a[1]] = value
+            elif op == 83:   # OpCopyObject
+                vals[a[1]] = vals[a[2]]
+            elif op == 128 and a[0] in ints:   # OpIAdd (32-bit)
+                vals[a[1]] = (vals[a[2]] + vals[a[3]]) & 0xffffffff
+            elif op == 177:   # OpSLessThan: flip the sign bit to compare as signed
+                vals[a[1]] = (vals[a[2]] ^ 0x80000000) < (vals[a[3]] ^ 0x80000000)
+            elif op == 218:   # OpEmitVertex; SPIR-V makes the outputs undefined after each emit
+                if ended or emitted == 3 or any(memory.pop(var) is not values[emitted] for var, values in forwarded.items()): return None
+                value = memory.pop(target)
+                match = next((loc for loc, values in routes.items() if value is values[emitted]), None)
+                if match is None or (emitted and route != match): return None
+                route, emitted = match, emitted + 1
+            elif op == 219:   # OpEndPrimitive; otherwise return ends the final strip
+                if emitted != 3 or ended: return None
+                ended = True
+            elif op in (246, 247):   # structured control-flow declarations
+                continue
+            elif op == 249:   # OpBranch
+                pc = labels[a[0]]
+            elif op == 250 and isinstance(vals[a[0]], bool):   # OpBranchConditional
+                pc = labels[a[1] if vals[a[0]] else a[2]]
+            elif op == 253:   # OpReturn
+                return route if emitted == 3 else None
+            else: return None
+    except (IndexError, KeyError, TypeError):
+        return None
+    return None
+
+def instance_locations(words):
+    """Metal requires the same viewport index at every vertex of a primitive."""
+    ops = list(spv_ops(words))
+    entry, = (a for op, a in ops if op == 15)
+    # Restrict the proof to ordinary logical pointers and a single function. Outputs can only be
+    # written via their variable or an access chain, and the scalar locations below have no members.
+    if sum(op == 54 for op, _ in ops) != 1 or any(op in (10, 67, 70) or op == 14 and a[0] != 0 or
+                                                 op == 17 and a[0] in (4441, 4442) for op, a in ops):
+        return []
+    interface = set(entry_interface(entry))
+    builtin = {a[0] for op, a in ops if op == OP_DECORATE and a[1:] == (DEC_BUILTIN, INSTANCE_INDEX) and a[0] in interface}
+    values = {a[1] for op, a in ops if op == 61 and a[2] in builtin}   # OpLoad InstanceIndex
+    if not values: return []
+    outputs = {a[1] for op, a in ops if op == 59 and a[2] == 3 and a[1] in interface}
+    stores = {v: set() for v in outputs}
+    for op, a in ops:
+        if op == 62 and a[0] in stores: stores[a[0]].add(a[1])
+        # A derived pointer or a copy into a candidate output would need a separate proof.
+        elif op in (65, 66, 83) and a[2] in stores: outputs.discard(a[2])
+        elif op in (63, 64) and a[0] in stores: outputs.discard(a[0])
+    locations = {}
+    for op, a in ops:
+        if op == OP_DECORATE and len(a) == 3 and a[1] == DEC_LOCATION and a[0] in stores:
+            locations.setdefault(a[2], []).append(a[0])
+    return sorted(loc for loc, members in locations.items() if len(members) == 1 and
+                  members[0] in outputs and stores[members[0]] and stores[members[0]] <= values)
+
+def viewport_variant(src, key, location):
+    out = re.search(rf'struct vk_{key}_out\s*\{{(.*?)\}};', src, re.S)
+    if not out: return None
+    # Removing the geometry stage must not expose vertex builtins that the stage did not forward.
+    if any(a != 'position' and not a.startswith('user(') for a in re.findall(r'\[\[([^\]]+)\]\]', out[1])):
+        return None
+    member = re.search(rf'\buint\s+\w+\s+(\[\[user\(locn{location}\)\]\]);', out[1])
+    if not member: return None
+    i, j = out.start(1) + member.start(1), out.start(1) + member.end(1)
+    return (src[:i] + '[[viewport_array_index]]' + src[j:]).replace(f'vk_{key}', f'vk_{key}_vp{location}')
+
+def one(source, tmp):
+    key, path, data = source
     if len(data) % 4: red(f'{path}: SPIR-V length {len(data)} is not a multiple of 4')
-    key = hashlib.sha256(data).hexdigest()[:16]   # of the game's words, which the host hashes
     words = fix_strides(list(struct.unpack(f'<{len(data) // 4}I', data)))
     src_spv = os.path.join(tmp, key + '.in.spv')
     with open(src_spv, 'wb') as f: f.write(struct.pack(f'<{len(words)}I', *words))
@@ -104,6 +353,9 @@ def one(path, tmp, root):
     eps = refl.get('entryPoints', [])
     if len(eps) != 1: red(f'{path}: entry points {eps} are not exactly one')
     stage = eps[0]['mode']
+    if stage == 'geom':
+        location = geometry_viewport(words)
+        if location is not None: return key, f'geomvp:{location}', [], [], path, ''
     if stage not in ('vert', 'frag', 'comp'): return stage   # skipped (main counts them)
     field = stage
     if stage == 'comp':
@@ -243,13 +495,29 @@ def one(path, tmp, root):
     src = PRECISE.sub(r'precise::\1(', src)
     with open(msl, 'w') as f: f.write(src)
     msls = [msl]
+    bone_index = ''
     if stage == 'frag':
         # Metal requires two outputs of the same type for the dual-source variant.
         outs = {int(i): t for t, i in re.findall(r'(\w+)\s+\w+\s+\[\[color\((\d+)\)\]\]', src)}
         if outs.keys() == {0, 1} and outs[0] == outs[1]:
             msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
             with open(msl_d, 'w') as f: f.write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
-    return key, field, res, msls, '/' + os.path.relpath(path, root)
+    elif stage == 'vert':
+        vertex_sources = [(key, src)]
+        if '.material.bin@' in path and (unsigned := unsigned_bone_indices(src)):
+            bone_index, variant = unsigned
+            name = f'{key}_u'
+            variant = variant.replace(f'vk_{key}', f'vk_{name}')
+            msl_u = os.path.join(tmp, name + '.metal'); msls.append(msl_u)
+            with open(msl_u, 'w') as f: f.write(variant)
+            vertex_sources.append((name, variant))
+        for location in instance_locations(words):
+            for name, vertex_source in vertex_sources:
+                variant = viewport_variant(vertex_source, name, location)
+                if variant is None: continue
+                msl_vp = os.path.join(tmp, f'{name}_vp{location}.metal'); msls.append(msl_vp)
+                with open(msl_vp, 'w') as f: f.write(variant)
+    return key, field, res, msls, path, bone_index
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
@@ -271,23 +539,24 @@ def main():
     a = sys.argv[1:]
     ios = None
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
-    if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]')
+    if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir | NSO>... <out dir> [--ios <dir>]')
     roots, out = a[:-1], a[-1]
-    files = [(p, r) for r in roots for p in spirv_files(r)]
+    files = list(spirv_sources(roots))
     if not files: red(f'no SPIR-V files in {" ".join(roots)}')
     with tempfile.TemporaryDirectory() as tmp:
-        with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda pr: one(pr[0], tmp, pr[1]), files))
+        with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda src: one(src, tmp), files))
         seen, skipped = {}, {}
         for row in rows:
             if isinstance(row, str): skipped[row] = skipped.get(row, 0) + 1; continue
-            key, stage, res, msl, src = row
-            if key in seen: continue
-            seen[key] = (stage, res, msl, src)
-        if skipped: print('[RED] skipped shader stages Metal does not have: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
-        msls = [m for v in seen.values() for m in v[2]]
-        tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; stage vert/frag/comp:x,y,z; resource kinds u/b/t/s/c/p and argument-buffer U/B/T/S/o/q',
+            key, stage, res, msl, src, info = row
+            seen[key] = (stage, res, msl, src, info)
+        if skipped: print('[RED] skipped unsupported shader stages: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
+        viewport_suffixes = {f'_vp{v[0].split(":")[1]}.metal' for v in seen.values() if v[0].startswith('geomvp:')}
+        msls = [m for v in seen.values() for m in v[2] if '_vp' not in os.path.basename(m) or any(m.endswith(s) for s in viewport_suffixes)]
+        tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; stage vert/frag/comp:x,y,z/geomvp:location; resource kinds u/b/t/s/c/p and argument-buffer U/B/T/S/o/q',
                '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
-        tsv += [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
+        tsv += [f'{k}\t{stage}\t{" ".join(res)}\t{src}' + (f'\t{info}' if info else '')
+                for k, (stage, res, _, src, info) in sorted(seen.items())]
         dirs = [(os.path.join(out, 'vk'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
@@ -297,4 +566,6 @@ def main():
             open(os.path.join(d, 'vk_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders → {lib}')
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    try: main()
+    except nso.Error as e: red(str(e))
