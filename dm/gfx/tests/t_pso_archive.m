@@ -801,6 +801,22 @@ static void app_folder_claim(void) {
     EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
 }
 
+// A write's wait for a plain compile still running (ser_begin): in play it gives up after SER_WAIT_MS and its period is dropped; the prebuild tool waits for the compile
+// (Donkey Kong Bananza's prebuild dropped a finished period of 1,663 pipelines behind one compute compile)
+static int plain_left_after(int tool, uint64_t compile_ms, uint64_t *waited_ms) {
+    g_pre_tool = tool; plain_compile_begin();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)compile_ms * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ plain_compile_end(); });
+    uint64_t t0 = now_ns(); int plain = ser_begin(); ser_end(); *waited_ms = (now_ns() - t0) / 1000000;
+    pthread_mutex_lock(&g_ser_mu); while (g_ser_compiles) { pthread_mutex_unlock(&g_ser_mu); usleep(10000); pthread_mutex_lock(&g_ser_mu); } pthread_mutex_unlock(&g_ser_mu);
+    g_pre_tool = 0; return plain;
+}
+static void tool_write_waits_for_compiles(void) {
+    uint64_t ms;
+    EXPECT("in play a write leaves a plain compile running past SER_WAIT_MS unresolved", 1, plain_left_after(0, SER_WAIT_MS + 600, &ms));
+    EXPECT("in play the write waited about SER_WAIT_MS", 1, ms >= SER_WAIT_MS - 50 && ms < SER_WAIT_MS + 500);
+    EXPECT("the prebuild tool's write waits for that compile", 0, plain_left_after(1, SER_WAIT_MS + 600, &ms));
+    EXPECT("until the compile returned", 1, ms >= SER_WAIT_MS + 550);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -1372,6 +1388,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     crashed_flush_race(0);
     crashed_flush_race(1);
     compiler_death_notifications();
+    tool_write_waits_for_compiles();
     // key normalization
     pso_key k; memset(&k, 0, sizeof k); k.blend_en = 0x5; k.dfmt = MTLPixelFormatDepth32Float; k.sfmt = MTLPixelFormatStencil8;
     for (int i = 0; i < 8; i++) { k.cfmt[i] = MTLPixelFormatRGBA8Unorm; k.blend[i].src_rgb = 5; k.blend[i].dst_rgb = 6; }   // every target present: only the blend rule acts

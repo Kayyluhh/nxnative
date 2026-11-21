@@ -10245,15 +10245,18 @@ static void ser_compile_leave(int plain) { pthread_mutex_lock(&g_ser_mu); g_ser_
 static void ser_compile_end(void) { ser_compile_leave(0); }
 static void plain_compile_end(void) { ser_compile_leave(1); }
 // A stuck capture must not stop every later compile behind a waiting write: after SER_WAIT_MS the write can proceed beside captures of other periods. An unresolved plain compile
-// could still report service death, so the writer drops its period instead. New compiles stay held back until ser_end. Returns the unresolved plain count under that exclusion
-enum { SER_WAIT_MS = 2000 };
+// could still report service death, so the writer drops its period instead. New compiles stay held back until ser_end. Returns the unresolved plain count under that exclusion.
+// The prebuild tool (g_pre_tool) plays nothing and exits after its last write, so it waits up to SER_TOOL_WAIT_MS: with 2 s, one compute compile still running at the end of
+// Donkey Kong Bananza's prewarm lists dropped a finished period of 1,663 pipelines, and the next start compiled 1,587 bases (prepare 1.3 -> 8.7 s, first frame 3.7 -> 16.1 s)
+enum { SER_WAIT_MS = 2000, SER_TOOL_WAIT_MS = 120000 };
 static int ser_begin(void) {
     pthread_mutex_lock(&g_ser_mu); g_ser_want++;
-    struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += SER_WAIT_MS / 1000; until.tv_nsec += (long)(SER_WAIT_MS % 1000) * 1000000;
+    const int wait_ms = g_pre_tool ? SER_TOOL_WAIT_MS : SER_WAIT_MS;
+    struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += wait_ms / 1000; until.tv_nsec += (long)(wait_ms % 1000) * 1000000;
     if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
     while (g_ser_compiles && pthread_cond_timedwait(&g_ser_cv, &g_ser_mu, &until) != ETIMEDOUT) {}
     int left = g_ser_compiles, plain = g_ser_plain; pthread_mutex_unlock(&g_ser_mu);
-    static _Atomic int told; if (left && !atomic_exchange(&told, 1)) MLOG("pipeline archive: %d compiles still under way after %d ms (%d plain): %s", left, SER_WAIT_MS, plain,
+    static _Atomic int told; if (left && !atomic_exchange(&told, 1)) MLOG("pipeline archive: %d compiles still under way after %d ms (%d plain): %s", left, wait_ms, plain,
         plain ? "the period is not written before those compiles report their errors" : "the write goes ahead beside captures of other periods (Metal may crash on that, see ser_begin)");
     return plain;
 }
