@@ -61,6 +61,13 @@
 - **Check:** `test_nsp_nup` Read.test_folder_cycle_refused: a folder made its own parent, then a cycle of two folders, each with the TOC hash fixed up, are refused, and the script exits 1 with no traceback. Without the check the container opens.
 - **Found on:** a code audit; no damaged NUP of this kind is known.
 
+### A NUP icon is written as control data
+
+- **Symptom:** the JPEG icon in a NUP is written as `control.nacp` and the display version is written as `icon.jpg`. A wrong-size NACP can also supply incorrect application and DLC IDs during scanning.
+- **Cause:** [nup PR #20](https://github.com/a55uka/nup/pull/20) replaced explicit TLV values with an enum that starts at 0. SPEC §5 starts at 1, so each type in a block produced by that writer is one too low. The upstream writer fix in [nup PR #22](https://github.com/a55uka/nup/pull/22) starts the enum at 1. In nxnative, scanning used the offsets of the ID fields as its only NACP size check.
+- **Fix:** `Package.meta()` normalizes a shifted block at read time. NACP and icon payloads determine the numbering when they can, with type 0 or a non-32-byte type 7 as fallback markers ([nup PR #32](https://github.com/a55uka/nup/pull/32)). The same reader omits NACP records whose size differs from `0x4000` before scanning or extraction uses them. Extraction reports these decisions once per package.
+- **Found on:** a sample written with upstream `nup` at `a4840f06` reproduced the swapped files. A Resident Evil 4 archive confirmed shifted numbering. A Super Mario Bros. Wonder archive contained a valid NACP at type 2 alongside shifted records.
+
 ### A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"
 
 - **Symptom:** `[RED] <file>.nup: 2 base packages`, `base program ID 040015100B514001 is not a base title ID`, or `010015100B515001 is not a DLC of 040015100B514001`, from a NUP of a Switch 1 game's Nintendo Switch 2 Edition ([PR #2692](https://github.com/seedds/nxnative/pull/2692)). Packed by hand on its own RomFS, the Switch 2 program crashed within a second of `nnMain` on a null `this` in a constructor: with no heap sizes the engine's heaps were never made. With an add-on older than the program: `[RED] game asks to show an error: its upgrade add-on content is older than this program needs`, then `CRASH sig=4` at the game's own trap (before the hook, a crash in `sdk` under `nn::applet::StartLibraryAppletImmediately`).
@@ -257,6 +264,15 @@
 - **Cause:** every check read `shutil.disk_usage` (`statvfs`), which counts only unallocated blocks. On APFS, space held by purgeable data (local Time Machine snapshots, caches the system deletes on demand) is not in it, though macOS frees that space while a write needs it.
 - **Fix:** `dm/tools/vol_space.py` `free_bytes` returns macOS's `kCFURLVolumeAvailableCapacityForImportantUsageKey` for the path's volume (the capacity for writes a user asked for, queried through CoreFoundation), never less than `statvfs`'s figure, and `statvfs` alone where macOS gives none. It asks the nearest existing folder of a path not made yet. The NSP script's `free_gb`, `pack_app.py`'s copy check and `pso_offline.py`'s checks before `metal-tt` and before the merge use it. Two reads keep `statvfs`: `tree_tar.pack_quiet`, housekeeping nobody asked for, which should make macOS purge nothing, and `pso_offline.py`'s diagnosis of a failed `metal-tt`, which reports what was really left. Tests: `dm/tools/tests/test_vol_space.py`.
 - **Found on:** a user's APFS volume with a local Time Machine snapshot holding over 50 GB of deleted files ([PR #2257](https://github.com/seedds/nxnative/pull/2257)): `statvfs` showed 18.84 GiB free and the capacity for important usage 68.02 GiB. With the capacity, an [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072 `--platform mac-app` build wrote 57 GB of work and a 35.2 GB app there, with 24 GiB still unallocated at the end. Applies to every game built on a Mac.
+
+### The shader split takes a minute on a RomFS of 300,000 files
+
+- **Symptom:** the NSP script's `shader split` step takes 60 to 77 s for Tears of the Kingdom on an M5 Pro. `shader_split.py` prints nothing for its first 26 s, then its `progress: n/304243` count slows after the first half.
+- **Cause:** only 1,683 of the 304,243 files hold a shader container, and parsing and de-duplicating shaders took under 1% of worker time. The CRA, zip, PDAT and RPF6 finders made 1.2 million opens in the parent process (22.9 of the 26.4 s before the scan). `unzs` also started `zstd` for each of 32,176 files without a dictionary, 39% of worker time. Image opens themselves added contention ([Processes that scan one RomFS image in parallel wait on its opens](#processes-that-scan-one-romfs-image-in-parallel-wait-on-its-opens)).
+- **Fix:** the pool reads the first eight bytes of each file in batches. The CRA, zip, PDAT and RPF6 finders validate the candidates selected by their first four bytes. The EA finder uses the same read and matches its four- and eight-byte signatures. `unzs` decodes all zstd frames in process, using the existing dictionary lookup when a dictionary is named. The separate Next Level Games decoder still uses the command.
+- **Measurement:** the [original PR](https://github.com/seedds/nxnative/pull/3002) measured a cold split on an 18-core M5 Pro, Python 3.13, with `J=18`. Tears of the Kingdom 1.4.3 went from 60.0 s (528 s CPU) to 17.5 s (215 s CPU) with both optimizations. Its split inside a cold pack went from 70.6 to 21.9 s. Breath of the Wild went from 70.1 to 67.1 s and Pokémon Scarlet stayed at 10.4 s. The package files and all four tables were byte-identical in all three comparisons on the PR base.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), while profiling the shader split.
+- **Check:** `test_split_magics.py` splits an image with a renamed zip, an eight-byte EA signature and concatenated zstd frames with an empty `PATH`. `test_easf.py` covers EA's version keys and DLC routing.
 
 ## Diagnostic reports
 
@@ -467,7 +483,7 @@
 
 - **Symptom:** the NSP script stops at the shader split of a registered profile with `[RED] 13744 file(s) could not be read, their shaders are left out (first: AI/FileEntry/FileEntry.Product.100.byml.zs: CalledProcessError: Command ['zstd', '-d', '-c', '-q', '…/extract/v0/RomFS.img/AI/…'] returned non-zero exit status 1.)`.
 - **Cause:** `shader_split.py`'s `unzs` read a `.zs` file through `romfs.open`, which reads inside the image, but then handed its path to the `zstd` command, which can only open real files (`Not a directory`).
-- **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
+- **Fix:** `unzs` initially fed the command the bytes it read and now [decodes zstd in process](#the-shader-split-takes-a-minute-on-a-romfs-of-300000-files). `test_romfs_read.py` checks a zstd file inside an image.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
 ### Under `--work-dir` the programs of one game overwrote each other's RomFS
@@ -483,6 +499,15 @@
 - **Cause:** an FTP dump keeps the server's directory listing as `.listing` in every folder, which the NUP spec (§6.3) allows a producer to keep. The RomFS image packed it as a game file, so a game that lists a folder saw one more entry. Switch Sports Resort cuts each name at its first `.`, got an empty name, loaded `Parameter/<folder>/` and found no resource.
 - **Fix:** `ARTIFACTS` in `dm/tools/romfs_image.py`, the dump-tool files that are not game files (`.listing`), is left out of the image, out of a NUP's RomFS (`scripts/pack_nup.py`) and out of the survey's file list (`dm/games/profile_guess.py`). Other dot files stay game files. Test: `test_romfs_image.py` (`test_dump_tool_listings_are_left_out`).
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md#found-on-this-game) (v65536, from a dump folder).
+
+### Processes that scan one RomFS image in parallel wait on its opens
+
+- **Symptom:** a tool that scans the files of one RomFS image spends much of its time opening them. In Tears of the Kingdom’s shader split, an open took 133 µs with 18 workers, against 28 µs with one.
+- **Cause:** every virtual file read opened the same backing image by path. Workers shared the kernel cost of repeated path resolution and opens of that image.
+- **Fix:** `romfs.reuse_descriptors` keeps a backing descriptor per image for the parent’s archive planning and for the lifetime of each scan worker. The virtual file gets a duplicate for its bounded `pread` or `mmap`. It reuses a descriptor only when the image identity still matches. The scan closes the backing descriptors on exit, and the metadata cache owns none.
+- **Measurement:** the [original PR](https://github.com/seedds/nxnative/pull/3002) isolated descriptor reuse on Tears of the Kingdom, with 60.0 → 47.7 s wall time and 528 → 471 s CPU time on an M5 Pro.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), while profiling the shader split.
+- **Check:** `test_romfs_read.py` verifies distinct virtual file descriptors, cleanup after an exception and correct reads after an image is replaced.
 
 ## Add-on content
 
