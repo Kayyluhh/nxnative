@@ -1,6 +1,6 @@
 # Donkey Kong Bananza (`040074A01BF12000`)
 
-A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. The Mac tests cover only the first level's opening areas. An initial [community iOS report](#ios-community-report) is recorded below.
+A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. The Mac tests cover only the first level's opening areas. See the [community iOS reports](#ios-community-report) for iPhone 18 Pro and M4 iPad Pro testing.
 
 ## iOS community report
 
@@ -8,7 +8,36 @@ A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Sw
 
 - No crash or `[RED]` line was reported. The opening minutes ran at about 60 fps; after thermal state reached 2, most windows ran at 45–60 fps, with a session average of 50.5 fps. One stretch ran at 30 fps; its cause was not checked.
 - Peak reported footprint was 5,575 MiB. Loads and area changes had frame-time p99 spikes of 50–166 ms.
-- Coverage is limited to this device, build and short session. Longer play, current main and other iOS devices remain unvalidated.
+- Longer play and current main remain unvalidated on this device.
+
+### M4 iPad Pro with paid Xcode signing
+
+On an 11-inch M4 iPad Pro (8 GB RAM), Bananza built from `e5620b1a` stopped at `FATAL reserve guest AS` when installed with Sideloadly or run in LiveContainer 3.8.0. The profile requests a contiguous 9.75 GiB guest address range (`mem_reserve 0x270000000`), which exceeded the address space available without Extended Virtual Addressing on that setup. The game booted and played after Xcode signed it with both memory entitlements using a paid Apple Developer Program team. [Community report in issue #924](https://github.com/seedds/nxnative/issues/924#issuecomment-6584539618)
+
+Save this plist as `bananza.entitlements`. `DM_ENTITLEMENTS` replaces the entire entitlement set, so the plist includes Increased Memory Limit and Extended Virtual Addressing.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+    <key>com.apple.developer.kernel.extended-virtual-addressing</key>
+    <true/>
+</dict>
+</plist>
+```
+
+From the repository root, prepare the Xcode project with the paid team's ID.
+
+```sh
+DM_ENTITLEMENTS="/path/to/bananza.entitlements" \
+  python3 scripts/build_ipa_from_nsp.py "/path/to/Bananza dump" \
+  --platform ios --prepare-xcode --team-id YOUR_TEAM_ID --romfs separate
+```
+
+If the default bundle ID is unavailable to your team, add `--bundle-id` with an identifier you own. Build the game's scheme in Release for the connected iPad with the paid team and automatic provisioning. The reporter used `xcodebuild -allowProvisioningUpdates`, checked both keys in `embedded.mobileprovision`, and installed with `xcrun devicectl device install app`. Use the printed `scripts/push_romfs.sh` command after installation to copy the separate image to `Documents/romfs.img`. [Xcode setup](../../../docs/development.md#build-and-run-on-a-device-with-xcode) · [Separate RomFS transfer](../../../docs/development.md#quick-reinstalls)
 
 ## What it needs
 
@@ -79,7 +108,7 @@ Each step below stopped the boot before its fix:
 - The NVN2 device values the driver reads from the GPU at run time (17 items: scratch scale factors, L2 size, texture layers and sizes, linear stride alignment, pool page size, …) are still the Switch 1 ones; the constant ones are NVN2's ([The Switch 2's device values](../../../docs/reference/nvn-objects.md#the-switch-2s-device-values)).
 - **Render scale (`DM_RENDER_SCALE`):** the stubs in `patches.py` replace the NDSR upscale rate bounds (`NdsrUpscaleMinRate` 1.375, `NdsrUpscaleMaxRate` 1.9, read at `main+0x38dd04` / `+0x38dd98` / `+0x38e104` / `+0x38e194`) and the rate the dynamic-resolution update applies (`main+0x38de2c`) with the loader's 1 / scale (state +0x14), so the scene keeps one size. The game draws only at its table's steps (1.0, 1.375, 1.5, 2.0 of the output, 2304x1296 docked and 1920x1080 handheld) and sizes its targets per step: a rate between the steps snaps down (0.8333 drew 2304x1296 docked); writing 1.2 into the table's 1.375 step (`[main+0x26ce408]+0x78`, +4) drew that step's 1397x786. Handheld 1920x1080 is 0.999.
 - **Frame time by mode (measured on PR #1847's branch, with its host changes the batch does not take; M4 MacBook Air, 2560x1440 screen, cool):** handheld 1920x1080 17.0 ms (GPU 15.5, translation 7.8), handheld 1397x786 16.6 ms (GPU 12.6), docked 1676x943 18.8 ms (GPU 16.4, translation 10.6: the docked tier draws more), docked 1536x864 about 18 ms. After `ea0c98df` (NVN queue scheduling) the 1080p frame is 18.1 ms: the submission snapshot adds about 1.2 ms before the replay; the game's GPU event waits and signals send almost every submission through the scheduler.
-- iOS: longer sessions, current main and other devices remain unvalidated; see the initial [community report](#ios-community-report).
+- iOS validation on current main and broader device coverage remain open. See the [community reports](#ios-community-report).
 
 ## Found on this game
 
