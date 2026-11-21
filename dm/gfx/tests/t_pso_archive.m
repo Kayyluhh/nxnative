@@ -897,6 +897,16 @@ int main(int argc, char **argv) { @autoreleasepool {
         fire_archive_timer();
         dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
         EXPECT("headless timer wrote the capture", 4, archive_files(@(dir)).count);
+        g_pre_tool = 1;   // the prebuild tool: a file per full period and the rest at a pass's end, never one per timer
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("tool: capture before the timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        fire_archive_timer();
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("tool: the timer writes nothing", 4, archive_files(@(dir)).count);
+        EXPECT("tool: the capture waits for the pass's end", 1, atomic_load(&g_arch_new));
+        arch_flush_wait();
+        EXPECT("tool: the pass's end writes it", 5, archive_files(@(dir)).count);
+        g_pre_tool = 0;
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive active flush: %d checks, %d failed\n", checks, failed);
         return failed != 0;

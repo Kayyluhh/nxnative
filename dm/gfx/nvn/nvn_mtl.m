@@ -10744,6 +10744,9 @@ enum ArchFlush { ARCH_FLUSH_NORMAL, ARCH_FLUSH_NOW, ARCH_FLUSH_TIMER };
 // Returns 1 when a windowed timer needs to try again. The timer claims the Metal serialization gate before detaching the period and writes it on this queue right away.
 static int arch_hand_over(ArchEpoch *only, enum ArchFlush mode) {
     int warm_due = 0;
+    // The prebuild tool writes a file per full period and the rest at each pass's end (pso_prebuild, pre_warm_lists), as a prewarm does: its lists run no prewarm (g_warm_running),
+    // so the timer that a compute or task / mesh capture arms (arch_note_new) wrote a file every 10 s, 500 to 1,500 pipelines each, which the next start compacted (Ocarina of Time)
+    if (mode == ARCH_FLUSH_TIMER && g_pre_tool) return 0;
     if (!g_arch_cap || (!only && mode != ARCH_FLUSH_NOW && atomic_load(&g_warm_running) && !(warm_due = arch_warm_flush_due()))) return 0;
     int windowed_timer = mode == ARCH_FLUSH_TIMER && mtl_has_window();
     if (windowed_timer && arch_recent_present()) return 1;
