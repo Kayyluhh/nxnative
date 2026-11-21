@@ -49,4 +49,5 @@ tex_flush_upload	on
 tex_dirty_upload	on
 # The game submits a frame's commands behind an event its CPU signals once the frame before has left the GPU, so the GPU starts each frame with nothing queued and waits for the
 # replay: with Metal encoding on its own thread a GPU-bound Hyrule Field scene went 55.3-55.8 -> 56.5-56.9 fps (Apple M4 Pro, three runs a side, interleaved)
+# As on iOS, where it is on for every game (PR #1928): the submit thread no longer waits for each pass's encoding, the GPU of a MacBook Air M4 starves less at segment boundaries (frame p50 24.5 → 23.5 ms at 1920x1080 docked, the Hyrule Field view)
 enc_thread	on
