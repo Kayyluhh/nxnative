@@ -11489,7 +11489,8 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         int d = ++g_pre_done;
         if (d % 1000 == 0) {
             MLOG("pipeline prebuild: %d of %d pairs, %d built, %d already archived, %d left to the draws, %d failed, %.0f s", d, n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
-            if (atomic_load(&g_arch_new) >= 1000) arch_flush();   // the serializer holds what it captured until written
+            // no flush here: a period hands itself over at its g_arch_period_max-th capture (arch_flush_from), so the pass writes a file per full period and the rest at its end.
+            // A flush at 1,000 made files of about 1,000 to 1,300 pipelines, a size tier compaction takes (arch_compact_pick): more than PSO_ARCH_COMPACT of them made the next start compact
         }
     };
     // a pair: built, or put back while another capture has one of its shader functions
@@ -11970,7 +11971,8 @@ static long pre_warm_lists(NSArray<NSString *> *paths, int threads) {
     while (dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC))) {
         MLOG("pipeline prebuild: %ld of %ld prewarm lines, %llu bases compiled, %llu from the archives, %d failed, %.0f s", (long)g_warm_done, lines, (unsigned long long)(g_pb_built - built0),
              (unsigned long long)(g_pb_archived - arch0), (int)atomic_load(&g_pre_warm_failed), (bp_now() - t0) / 1e9);
-        if (atomic_load(&g_arch_new) >= 1000) arch_flush();   // the serializer holds what it captured until written
+        // no flush at 1,000 captures, as in pso_prebuild: a file per full period (arch_flush_from at g_arch_period_max) and one for the rest below, never a file of each 10 s.
+        // With them Ocarina of Time's lists left 23 files of 1 to 1,347 pipelines, and its next start compacted them (6,864 bases captured again before the first frame)
     }
     arch_flush_wait();   // with the C and M rows' captures, which the harvest queue makes after g: nothing is left for mtl_arch_save at exit
     g_warm_dict = nil; g_warm_loads = nil;

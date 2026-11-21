@@ -1553,6 +1553,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pso_archive` (`tool_write_waits_for_compiles`): a plain compile that returns 2.6 s after a write starts is left unresolved after about 2 s in play and waited for in the tool; without the fix the tool's two checks fail.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) (M3 Max, `regress.py check` 2026-11-20): the batch's prebuild, with 170 compute shaders more in its lists (PR #2251), lost the period and the run's first frame came at 16.1 s against 3.7 s on main, whose prebuild happened to finish its compiles in time.
 
+### The prebuild's flushes at 1,000 captures left files the next start compacts
+
+- **Symptom:** the first start after a prebuild (`DM_PSO_PREBUILD=tool`, its device form: `regress.py check`, the NSP script's run folders) spends its prepare step capturing bases again: `bases 17 compiled, 6870 from the archive (6864 of them captured again for the compaction)`, prepare 120 s on Ocarina of Time; then `[RED] pipeline archive: compaction left the old files (a flush failed, or a base was not captured again)`. The prebuild's log has a run of `written to <seq>-<count>.mtl4a` lines of 1 to 1,347 pipelines.
+- **Cause:** both prebuild passes (`pso_prebuild`'s pairs, `pre_warm_lists`) flushed whenever 1,000 captures were waiting, so their files held about 1,000 to 1,300 pipelines, a size tier compaction takes, instead of a full period's 2,000, which it never takes. The rule [a prewarm writes a file per full period](#a-cold-start-leaves-a-file-per-timer-flush-and-the-next-start-compacts-them-all) had not reached the prebuild, added later (PR #2353). It showed once [the prebuild stopped dropping periods](#the-prebuild-dropped-a-finished-period-behind-one-slow-compile): Ocarina of Time's lists left 23 such files, more than `PSO_ARCH_COMPACT` in one tier. Why that compaction left the old files is open.
+- **Fix:** neither pass flushes on a count of its own: a period hands itself over at its `ARCH_PERIOD_MAX`-th capture (`arch_flush_from`) and the rest is written at the pass's end (`arch_flush_wait`).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pso_prewarm check_t_pso_archive check_t_pso_warm` (a file per period with the period lowered, unchanged); `regress.py check` on Ocarina of Time for the start after a prebuild.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) (M3 Max, `regress.py check` 2026-11-20).
+
 ### A timed archive write stalls active presentation
 
 - **Symptom:** the title screen or a menu stops for over a second. The log shows a pipeline archive write and several compiles waiting for it, even when the affected frame did little new pipeline work.

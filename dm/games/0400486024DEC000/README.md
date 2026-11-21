@@ -259,6 +259,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [The prebuild's flushes at 1,000 captures left files the next start compacts](../../../docs/reference/rendering.md#the-prebuilds-flushes-at-1000-captures-left-files-the-next-start-compacts): the prebuild's lists left 23 run files, and the start after it captured 6,864 bases again (prepare 120 s) in a compaction that left the old files; main's prebuild had dropped 14 periods (7,834 pipelines) instead ([the 2 s wait](../../../docs/reference/rendering.md#the-prebuild-dropped-a-finished-period-behind-one-slow-compile)).
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.
 - [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
 
