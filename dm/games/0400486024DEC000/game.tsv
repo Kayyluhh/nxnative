@@ -48,6 +48,5 @@ draw_barriers	game
 tex_flush_upload	on
 tex_dirty_upload	on
 # The game submits a frame's commands behind an event its CPU signals once the frame before has left the GPU, so the GPU starts each frame with nothing queued and waits for the
-# replay: with Metal encoding on its own thread a GPU-bound Hyrule Field scene went 55.3-55.8 -> 56.5-56.9 fps (Apple M4 Pro, three runs a side, interleaved); on an M3 Pro, the village
-# after the opening (three runs a side), 48.2 -> 49.0 fps, frame p50 16.82 -> 16.72 ms, GPU time unchanged (PR #2719). As on iOS, where it is on for every game
+# replay: with Metal encoding on its own thread a GPU-bound Hyrule Field scene went 55.3-55.8 -> 56.5-56.9 fps (Apple M4 Pro, three runs a side, interleaved)
 enc_thread	on
