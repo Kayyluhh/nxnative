@@ -283,9 +283,17 @@ class Game:
             # a game the revision does not know (its profile is new in the candidate: a bring-up PR): the baseline's chain translates its shaders with the candidate's profile,
             # the same inputs, so the comparison is of the chains alone
             src = REPO / 'dm/games' / self.id
-        key = digest(sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED))[:16]   # validated.tsv records a result about the profile, it is not an input of it
+        # A derived profile made for installed DLC (build_ipa_from_nsp.py derive_profile, shader_only) links its patches.py to the checkout's profile, the registered builds' cuts,
+        # which patch_nso.py counts once with the repository's (realpath). A copy of the link is a second file claiming the same builds (the rewrite stopped: Donkey Kong Bananza),
+        # and it holds the checkout's cuts, not the revision's. The copy links the revision tree's own file instead, or has none when the revision's profile has none
+        linked = self.derived and (src / 'patches.py').is_symlink()
+        own = tree.path / 'dm/games' / self.id / 'patches.py'
+        files = sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED and not (linked and p.name == 'patches.py'))   # validated.tsv records a result about the profile, it is not an input of it
+        key = digest(files + ([own] if linked and own.is_file() else []))[:16]
         dst = game_root(self) / 'profiles' / key / self.id
-        if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED))
+        if not (dst / 'game.tsv').is_file():
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED, *(['patches.py'] if linked else [])))
+            if linked and own.is_file(): (dst / 'patches.py').symlink_to(own)
         return dst
 
     def shader_roots(self):

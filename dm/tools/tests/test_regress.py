@@ -779,6 +779,23 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
             self.assertEqual(env['DM_GAMES_DIR'], str(g.profile_dir(tree).parent))
             self.assertEqual(env['DM_GAMES_FIRST'], '1')
 
+    def test_a_derived_profiles_linked_patches_follow_the_revision(self):   # Donkey Kong Bananza with DLC: the copy of the link claimed its builds' cuts a second time
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); gid = '0' * 16; folder = root / 'nsp'; folder.mkdir()
+            build = folder / (gid + '_build'); own = build / 'profile' / gid; own.mkdir(parents=True)
+            (own / 'game.tsv').write_text('depth_mode\tgl\n'); (build / 'profile' / f'{gid}.derived.key').write_text('key\n')
+            checkout = root / 'checkout/dm/games' / gid; checkout.mkdir(parents=True); (checkout / 'patches.py').write_text("CUTS = {'checkout': []}\n")
+            (own / 'patches.py').symlink_to(checkout / 'patches.py')   # as derive_profile(shader_only) links it
+            cut = NS(path=root / 'cut', id='cut'); src = cut.path / 'dm/games' / gid; src.mkdir(parents=True); (src / 'patches.py').write_text("CUTS = {'cut': []}\n")
+            bare = NS(path=root / 'bare', id='bare'); (bare.path / 'dm/games' / gid).mkdir(parents=True)
+            g = regress.Game(folder, build); self.assertTrue(g.derived)
+            with_cut, without = g.profile_dir(cut), g.profile_dir(bare)
+            self.assertNotEqual(with_cut, without)
+            self.assertTrue((with_cut / 'patches.py').is_symlink())
+            self.assertEqual((with_cut / 'patches.py').resolve(), (src / 'patches.py').resolve())   # one file to patch_nso.py's realpath check, the revision's cuts
+            self.assertFalse((without / 'patches.py').exists())                                       # a revision without cuts for the game has none, not the checkout's
+            self.assertEqual((with_cut / 'game.tsv').read_text(), 'depth_mode\tgl\n')
+
     def test_vk_roots_include_runtime_capture(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); build = root / ('0' * 16 + '_build')
