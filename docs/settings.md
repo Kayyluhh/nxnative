@@ -6,7 +6,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Screen upscaling](#screen-upscaling), [3D upscaler](#3d-upscaler), [Game language](#game-language), [Picture](#picture), [Sound output](#sound-output), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
-- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode), [Menu bar in fullscreen](#menu-bar-in-fullscreen)
+- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
@@ -250,10 +250,6 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
-### Menu bar in fullscreen
-
-**Shows at the top edge** by default: in fullscreen, the menu bar (with **Cheats** and leaving fullscreen) and the Dock come back when the pointer reaches the edge of the screen, as in other Mac apps. **Hidden** keeps them away for good, for a Mac where the menu bar comes over the game (seen on one Mac with two screens); ⌃⌘F still leaves fullscreen and ⌘Q quits. It takes effect the next time the window goes fullscreen. In an `env.txt`: `DM_FULLSCREEN_MENUBAR=auto` or `hide`.
-
 ### Switch 2 controllers
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.
@@ -294,7 +290,6 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Decoration distance | `DM_DECO_DISTANCE` | `1.0`, `0.75`, `0.5` (Mac, games with RomFS tweaks) |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
-| Menu bar in fullscreen (Mac) | `DM_FULLSCREEN_MENUBAR` | `auto` shown at the top edge, `hide` hidden |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | On builds with screen-shape stubs, `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.6` MacBook (16:10, Mac only); `1.43` the iPhone Duo's shape, `0` 16:9 |
