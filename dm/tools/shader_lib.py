@@ -87,22 +87,25 @@ def _same(out, offset, source, size):
     return source.read(1) == b''   # a path can grow between hashing and comparison, including an empty file
 
 
-def write(files, dst):
+def write(files, dst, on_progress=None):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
     shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. Identical files share a range, with every name preserved. Hashes select candidates;
     bytes must match before a range is reused. Read paths a chunk at a time, twice for a new payload, so duplicates never take temporary disk space. A failed write removes its .part,
-    so a full drive gets its space back; a killed one leaves only the .part. An image is whole or absent"""
+    so a full drive gets its space back; a killed one leaves only the .part. An image is whole or absent. on_progress, when given, is called as (done_files, total_files, bytes_written)
+    at start and after each entry"""
     part = dst + '.part'
-    try: _write_part(files, part); os.replace(part, dst)
+    try: _write_part(files, part, on_progress); os.replace(part, dst)
     except BaseException:
         try: os.unlink(part)
         except OSError: pass
         raise
 
 
-def _write_part(files, part):   # write()'s image, at part
+def _write_part(files, part, on_progress=None):   # write()'s image, at part
     names = sorted((n.encode() for n in files))
+    total = len(names)
     ents, off, seen = [], romfs.HEAD.size, {}
+    if on_progress: on_progress(0, total, 0)
     # The sources given as functions are called on a few threads, up to 4 * READERS entries ahead of the writer, which takes them in order: one after the other, the 300,000 outputs of
     # Ocarina of Time's shader build came out of its cache file at 190 MB/s, a minute for its 10.7 GB image (shader_cache.py reads on a connection of each thread's own then)
     readers = concurrent.futures.ThreadPoolExecutor(READERS) if any(callable(v) for v in files.values()) else None
@@ -118,7 +121,7 @@ def _write_part(files, part):   # write()'s image, at part
     with builtins.open(part, 'w+b') as out, contextlib.ExitStack() as done:
         if readers: done.callback(readers.shutdown, cancel_futures=True)   # after an error, the functions not yet called are not
         out.write(b'\0' * off)
-        for name, source in sources():
+        for i, (name, source) in enumerate(sources(), 1):
             if source is None: raise OSError(f'{name.decode()}: no bytes to write')
             if not isinstance(source, (bytes, str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
             with io.BytesIO(source) if isinstance(source, bytes) else romfs.open(source, 'rb') as f:
@@ -132,6 +135,7 @@ def _write_part(files, part):   # write()'s image, at part
                     if (copied, h.digest()) != (n, digest): raise OSError(f'{name.decode()}: changed while writing the shader library')
                     candidates.append(at); off = at + n
                 ents.append((name, at, n))
+            if on_progress: on_progress(i, total, off)
         out.seek(off)
         pool, idx = bytearray(), bytearray(romfs.ENT.pack(1, len(names), 0, 0, 0, 0))   # entry 0, the root: its children are every other entry
         for name, a, b in ents:
