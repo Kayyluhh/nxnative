@@ -55,12 +55,12 @@ def run(constant, rate, seconds, target=60.0, step=1):
     profile.frame_step(ctx)
     machine.mem_write(BASE + STATE, struct.pack('<f', target))
     machine.mem_write(BASE + STATE + 0x20, struct.pack('<I', step))
-    machine.mem_write(BASE + STATE + 0x38, struct.pack('<f', seconds))
+    machine.mem_write(BASE + STATE + 0xa0, struct.pack('<f', seconds))
     machine.reg_write(arm.UC_ARM64_REG_S1, float_reg(constant))
     machine.reg_write(arm.UC_ARM64_REG_S0, float_reg(rate))
     machine.emu_start(BASE + SITE, BASE + SITE + 4, count=32)
     ratio = struct.unpack('<f', struct.pack('<I', machine.reg_read(arm.UC_ARM64_REG_S8) & 0xffffffff))[0]
-    mark = struct.unpack('<I', machine.mem_read(BASE + STATE + 0x3c, 4))[0]
+    mark = struct.unpack('<I', machine.mem_read(BASE + STATE + 0xa4, 4))[0]
     stepped = struct.unpack('<Q', machine.mem_read(BASE + STATE + 0x30, 8))[0]
     return ratio, mark, ctx, machine.reg_read(arm.UC_ARM64_REG_PC), stepped
 
