@@ -23,9 +23,10 @@ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		le
 DM_DECO_DISTANCE	choice	1.0=Full,0.75=Shorter,0.5=Shortest	1.0	tweaks:DM_DECO_DISTANCE	Game	Decoration distance	How far away grass and small decoration are drawn. Shorter is lighter on the CPU: it can raise the frame rate in grassy areas.
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Screen upscaling	Scales the finished picture to your screen. Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	3D upscaler	Replaces the game's own upscaler of the 3D scene. Saves GPU time; the picture looks different.
+DM_NVN_ANISO	choice	0=Game default,2=2x,4=4x,8=8x,16=16x	0	platform:mac&gfxapi:nvn	Game	Texture filtering	Sharper ground and walls seen at an angle. 16x costs little on a Mac.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
-DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
+DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	always	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_ROTATION	choice	auto=Automatic,landscape=Landscape,portrait=Portrait	auto	platform:ios	Game	Rotation
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback

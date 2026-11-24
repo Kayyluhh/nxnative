@@ -43,6 +43,9 @@
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · REDengine 3 (The Witcher 3): GLSLC outputs in RDHS material caches and FZLC static caches, see rdhs_shaders and fzlc_shaders
+#   · shadercache.nx (Blind Squirrel's Unreal Engine 3 ports: BioShock Remastered v13, BioShock 2 Remastered v28): header {u32 version, u32 block count}, then per block
+#       {u32 stored length, [u32 raw length in v28,] one zlib stream}; the blocks are joined before scanning because records straddle block boundaries. A record = 16-byte header
+#       {u32 control length, u32 code length, ?, ?}, code area, control section; see shadercache_nx
 #   · bnd2 (Criterion's Bundle 2: Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): whole GLSLC outputs in its zlib resources, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
@@ -50,9 +53,8 @@
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
-#   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in the forge files' Oodle containers and in the loose ShaderDataNVN.bin) and
-#     versions 25 / 31 (Assassin's Creed: The Ezio Collection, control sections each followed by its code area in Oodle Leviathan / Mermaid blocks), decoded by the game's own decoder in the
-#     Mac host, see forge_jobs, forge_shaders and anvil_shaders
+#   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in Oodle containers and loose ShaderDataNVN.bin), versions 25 / 31 (Assassin's
+#     Creed: The Ezio Collection, control sections followed by code areas in Oodle blocks), and version 27 (Assassin's Creed III Remastered, BNSH in LZO1X blocks), see forge_jobs and forge_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
 #   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
@@ -878,7 +880,10 @@ def pacx4_unchunk(d, at, chunks, n, where):
     out = bytearray()
     for c, u in chunks:
         raw = span(d, at, c, where)
-        out += raw if c == u else lz4.block.decompress(raw, uncompressed_size=u)
+        if c != u:
+            try: raw = lz4.block.decompress(raw, uncompressed_size=u)
+            except lz4.block.LZ4BlockError as e: red(f'{where}: invalid LZ4 chunk at {at:#x}: {e}')
+        out += raw
         at += c
     if len(out) != n: red(f'{where}: its chunks give {len(out):#x} bytes, its length is {n:#x}')
     return bytes(out)
@@ -1373,14 +1378,25 @@ def cpk_jobs(files, parts=64):
         if cur: jobs.append((p, r, tuple(cur)))
     return jobs, {p for p, _, _ in with_head}
 
-def cpk_shaders(path, rel, ents, out):
-    """A range of CPK entries (cpk_jobs), each decoded (CRILAYLA or stored) and scanned like a loose file"""
-    import cpk
+def cpk_shaders(path, rel, ents, out, trees):
+    """Scan CPK entries, including Unity asset bundles, and return their pass pairs and entries needing borrowed trees."""
+    import cpk, unityfs
+    pairs, deferred = set(), []
     for e in ents:
         try: d = cpk.read(path, e)
         except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
-        scan_blob(d, f'/{rel}/{e[0]}', out)
+        where = f'/{rel}/{e[0]}'
+        if COMMON is None or not is_unity_asset(d):
+            scan_blob(d, where, out)
+            continue
+        member = []
+        try: pairs |= unity_shaders(d, where, member, trees)
+        except unityfs.NoTree:
+            deferred.append(e)
+            continue
+        out.extend(member)
+    return pairs, deferred
 
 MDB1 = b'MDB1'   # job tag: Media.Vision's MVGL archives (mvgl.py)
 def mvgl_jobs(files, parts=64):
@@ -1887,8 +1903,11 @@ def pg_sized_shader(d, label):
     return [(f'{label}#PGSO', st, ctl, code)]
 
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
-def _zlib_header(d):
-    return len(d) >= 2 and (d[0] & 0xf) == 8 and (d[0] >> 4) <= 7 and (d[0] * 256 + d[1]) % 31 == 0
+def _zlib_header(d, at=0):
+    """Check the RFC 1950 zlib header at `at` for deflate, a window up to 32 KiB and valid FCHECK."""
+    if at + 2 > len(d): return False
+    b0, b1 = d[at], d[at + 1]
+    return (b0 & 0x0f) == 8 and (b0 >> 4) <= 7 and ((b0 << 8) | b1) % 31 == 0
 
 def mtarc_members(d, label):
     """Capcom's MT Framework archive: 'ARC\\0', u16 version, u16 entry count, then one entry per file. → (path, data) of each entry.
@@ -2959,30 +2978,95 @@ def mgfx_effect(d, p, label):
     if r.p > len(d) or xnb and d[r.p:].strip(b'\0'): red(f'{label} MGFX @{p:#x}: the effect ends at {r.p:#x}, the file at {len(d):#x}')
     return out
 
+def _xnb_varint(buf, pos):
+    """Read a non-negative .NET 7-bit encoded int at buf[pos:] → (value, next_pos), (None, pos) if short, or (-1, pos) if malformed."""
+    val = sh = 0
+    while pos < len(buf):
+        b = buf[pos]; pos += 1
+        val |= (b & 0x7f) << sh
+        if b < 0x80: return val, pos
+        sh += 7
+        if sh >= 35: return -1, pos
+    return None, pos
+
+def _xnb_has_effect_reader(d):
+    """Whether an uncompressed XNB buffer (with or without its 10-byte XNB header) lists an .EffectReader in its type reader table."""
+    if d[:3] == b'XNB':
+        if len(d) < 11 or (d[4] == 5 and d[5] & 0xC0): return False
+        pos = 10
+    else:
+        pos = 0
+    n, pos = _xnb_varint(d, pos)
+    if n is None or not 0 <= n <= 0x10000: return False
+    for _ in range(n):
+        ln, pos = _xnb_varint(d, pos)
+        if ln is None or not 0 <= ln <= 0x10000 or pos + ln + 4 > len(d): return False
+        if b'.EffectReader' in d[pos:pos + ln]: return True
+        pos += ln + 4
+    return False
+
 def mgfx_shaders(d, label):
     out = []
     for m in re.finditer(MGFX, d): out += mgfx_effect(d, m.start(), label) or []
-    if label.lower().endswith(('.xnb', '.zxnb')) and b'.EffectReader' in d[:0x200] and not out:
+    if label.lower().endswith(('.xnb', '.zxnb')) and (_xnb_has_effect_reader(d) or b'.EffectReader' in d[:0x200]) and not out:
         red(f'{label}: an XNB effect without an MGFX version 5, 8 or 10 effect of NVN shaders')
     return out
 
 def zxnb_effect(path, label):
     """Peek a raw-DEFLATE .zxnb (Tribute Games' ParisEngine: TMNT: Shredder's Revenge has 1,547, only 13 effects):
-    return the full decompressed XNB only when the stream begins with an XNB EffectReader header, b'' for other raw-DEFLATE
-    .zxnb assets (textures, fonts, SoundEffectReader audio), or None if the file is not raw DEFLATE."""
+    parse the XNB header and type reader table incrementally and return the full decompressed XNB only when a reader entry
+    names .EffectReader (or the XNB itself is LZX/LZ4-compressed), b'' for other raw-DEFLATE .zxnb assets (textures, fonts,
+    SoundEffectReader audio), or None if the file is not raw DEFLATE."""
     limit = max(GZIP_FLOOR, NEST * os.path.getsize(path))
     with open(path, 'rb') as f:
-        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), b''
-        try:
-            while len(head) < 0x200 and not dec.eof:
+        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), bytearray()
+        def pull(need):
+            while len(head) < need and not dec.eof and len(head) <= limit:
+                want = min(need, limit + 1) - len(head)
+                if dec.unconsumed_tail:
+                    head.extend(dec.decompress(dec.unconsumed_tail, want))
+                    continue
                 chunk = f.read(4096)
                 if not chunk: break
-                head += dec.decompress(chunk, 0x200 - len(head))
+                head.extend(dec.decompress(chunk, want))
+        def read_varint(pos):
+            val = sh = 0
+            while True:
+                pull(pos + 1)
+                if pos >= len(head): return None, pos
+                b = head[pos]; pos += 1
+                val |= (b & 0x7f) << sh
+                if b < 0x80: return val, pos
+                sh += 7
+                if sh >= 35: return -1, pos
+        try:
+            pull(10)
         except zlib.error:
             return None
-        if head[:3] != b'XNB' or b'.EffectReader' not in head:
+        if len(head) < 10 or head[:3] != b'XNB':
             return b''
-        out, total = [head], len(head)
+        is_effect = head[4] == 5 and bool(head[5] & 0xC0)
+        if not is_effect:
+            try:
+                n, pos = read_varint(10)
+                if n is not None and 0 <= n <= 0x10000:
+                    for _ in range(n):
+                        ln, pos = read_varint(pos)
+                        if ln is None or not 0 <= ln <= 0x10000: break
+                        pull(pos + ln + 4)
+                        if len(head) > limit: red(f'{label}: raw-DEFLATE stream expands beyond its {limit:#x} byte budget')
+                        if pos + ln > len(head):
+                            if not dec.eof: red(f'{label}: truncated raw-DEFLATE stream')
+                            break
+                        if b'.EffectReader' in head[pos:pos + ln]:
+                            is_effect = True
+                            break
+                        pos += ln + 4
+            except zlib.error as e:
+                red(f'{label}: invalid raw-DEFLATE stream ({e})')
+        if not is_effect:
+            return b''
+        out, total = [bytes(head)], len(head)
         try:
             if dec.unconsumed_tail:
                 part = dec.decompress(dec.unconsumed_tail, limit - total + 1)
@@ -3422,15 +3506,14 @@ FORGE, FORGE_DATA, ANVIL_CODE = b'scimitar\0', bytes.fromhex('33aafb5799fa0410')
 ANVIL_FORGE = 'Anvil forge'
 
 def forge_entries(f, label):
-    """The entries of a Ubisoft Anvil / Scimitar forge (forge.py): version 28 (Immortals Fenyx Rising) or versions 25 / 31 (The Ezio Collection)."""
+    """The entries of a Ubisoft Anvil / Scimitar forge (forge.py)."""
     import forge
     f.seek(0)
     try: return forge.entries(f.read(), label)
     except ValueError as e: red(str(e))
 
 def forge_jobs(files, parts=64):
-    """Ubisoft Anvil / Scimitar forges (forge.py): version 28 (Immortals Fenyx Rising: GPUCODEONLY records) and versions 25 / 31 (Assassin's Creed: The Ezio Collection: control sections
-    followed by code areas in material templates). Every entry is Oodle-compressed and decoded by the game's own decoder in the Mac host.
+    """Ubisoft Anvil / Scimitar forges (forge.py), split into jobs in index order (offset order for v28).
     → ([(forge path, rel, (ANVIL_FORGE, version, entries)), …] in about equal stored sizes, plus error jobs for unknown-version / damaged forges; the forges taken)"""
     import forge
     from romfs import mmap
@@ -3476,9 +3559,7 @@ def anvil_shaders(d, label):
     return out
 
 def forge_shaders(path, rel, ver, ents, out):
-    """A range of one Ubisoft Anvil / Scimitar forge's entries (forge_jobs), each decoded with the game's Oodle.
-    Version 28 (Immortals Fenyx Rising): GPUCODEONLY records, labels /<forge>#<file ID>#GPUCODEONLY@<offset>.
-    Versions 25 / 31 (The Ezio Collection): control sections each followed by its code area (forge.nvn_shaders), labels /<forge>#SCIMITAR:<entry name>@<offset in its block>"""
+    """Decode a range of Anvil / Scimitar forge entries. V27 stores BNSH in LZO1X blocks. V28 stores GPUCODEONLY records and v25/v31 store adjacent control / code pairs, using Oodle."""
     import forge
     from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
@@ -3489,6 +3570,22 @@ def forge_shaders(path, rel, ver, ents, out):
                 except ValueError as e: red(str(e))
                 for b in blobs:
                     if ANVIL_CODE in b: out += anvil_shaders(b, label)
+        elif ver == forge.SCIMITAR_LZO_VERSION:
+            for off, size, name in ents:
+                label = f'/{rel}#SCIMITAR:{off:x}:{name}'
+                try: blobs = forge.read(d, off, size, None, label, version=ver)
+                except ValueError as e: red(str(e))
+                for i, blob in enumerate(blobs):
+                    if b'BNSH\0\0\0\0' not in blob: continue
+                    found = []
+                    scan_blob(blob, f'{label}/block{i}', found)
+                    counts = collections.Counter(where for where, _, _, _ in found)
+                    for where, stage, ctl, code in found:
+                        # AC III and Liberation store one stage per BNSH. Only genuine multi-stage variations supply their own pairs.
+                        if '#BNSH@' in where and counts[where] == 1:
+                            source, variation = where.rsplit('#var', 1)
+                            where = f'{source}#stage{variation}'
+                        out.append((where, stage, ctl, code))
         else:
             for off, size, name in ents:
                 label = f'/{rel}#SCIMITAR:{name}'
@@ -3659,6 +3756,57 @@ def ue3_shaders(d, label):
         if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
     return out
+
+
+def ue3_shared_buffers(d, label):
+    """UE3's UniShaderBuffer export (XCOM 2, main+0xcdf770): after the UObject fields and one word come three byte arrays, each length-prefixed, holding control, code and reflection."""
+    export, = field(d, '<I', 8, label)
+    if export < 12 or b'\x10\0\0\0UniShaderBuffer\0' not in d[:export]: red(f'{label}: no UniShaderBuffer export')
+    at, arrays = export + 0x30, []
+    data = memoryview(d)
+    for name in ('control', 'code', 'reflection'):
+        size, = field(data, '<I', at, f'{label}: {name} array size')
+        at += 4
+        arrays.append(span(data, at, size, f'{label}: {name} array'))
+        at += size
+    if at != len(d): red(f'{label}: UniShaderBuffer arrays do not fill the export')
+    return arrays[0], arrays[1]
+
+
+def ue3_shared_shaders(d, label, controls, codes):
+    """UNIS v1 cache records refer to the shared NVN buffers by offset (main+0xcca610). The reflection bytes and their offset are local to the record."""
+    out, seen = [], set()
+    for m in re.finditer(b'UNIS\x01\0\0\0', d):
+        off = m.start()
+        if off < 4 or off + 0x20 > len(d): continue
+        size, _, _, nk, k, nc, c, nr, r = struct.unpack_from('<9I', d, off - 4)
+        if size != 0x20 + r + nr or off + size > len(d) or k & 0xff or c & 7 or nk < 0x34 or nc < 0x760: continue
+        ref = (k, nk, c, nc)
+        if ref in seen: continue
+        seen.add(ref)
+        where = f'{label}#UE3@{off:x}'
+        ctl, code = bytes(span(controls, c, nc, where)), bytes(span(codes, k, nk, where))
+        st = glslc_stage(ctl, code)
+        why = check(where, st, ctl, code) if st else 'no shader stage in the referenced sections'
+        if why: red(f'{where}: {why}')
+        out.append((where, st, ctl, code))
+    return out
+
+
+def ue3_shared_cache(d, path, rel):
+    controls, codes = ue3_shared_buffers(d, '/' + rel)
+    platform = os.path.basename(path).removeprefix('UniShaderBuffer-').removesuffix('.upk')
+    out = []
+    for name in (f'GlobalShaderCache-{platform}.bin', f'RefShaderCache-{platform}.upk'):
+        cache = os.path.join(os.path.dirname(path), name)
+        if not os.path.isfile(cache): continue
+        label = '/' + os.path.join(os.path.dirname(rel), name)
+        with open(cache, 'rb') as f: data = f.read()
+        body = ue3_body(data, label) if ue3_package(data) else data
+        out.extend(ue3_shared_shaders(body, label, controls, codes))
+    if not out: red(f'/{rel}: no UNIS references in the sibling shader caches')
+    return out
+
 
 UE_LEGACY, UE_IO = 'UE legacy pak', 'UE IoStore'
 def ue_legacy_jobs(files, parts=64, mains=()):
@@ -4204,6 +4352,10 @@ def unity_pass_pairs(o, programs):
                 pairs.update((v, f) for v in stages['vs'] for f in cover)
     return pairs
 
+def is_unity_asset(d):
+    import unityfs
+    return d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and unityfs.is_serialized(d))
+
 def unity_shaders(d, label, out, trees):
     """Shaders and compute shaders in a UnityFS bundle or serialized file → out and legacy pass pairs; raises NoTree when no type tree is available"""
     import unityfs
@@ -4465,7 +4617,7 @@ SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#N
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
 # each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); Blizzard's: Diablo III's SNO assets (d3cpk_shaders) and Diablo II: Resurrected's SHAD containers, a file per stage
-# whose permutations the game binds per draw (shad_shaders); and Scimitar's material templates (forge_shaders v25/v31): Assassin's Creed II binds its vertex and pixel
+# whose permutations the game binds per draw (shad_shaders); and Scimitar's material templates (forge_shaders v25/v27/v31): Assassin's Creed II binds its vertex and pixel
 # programs apart (BindProgram stage bits) and pairs them at draw time, so without the cover 8 pairs failed to link, the Ubisoft logo movie's among them (a black screen with its sound)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
@@ -4675,8 +4827,15 @@ def unreadable_why(e, name):
     why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
     return why if why.lstrip('/').startswith(name.lstrip('/')) else f'{name}: {why}'   # most red lines name the file already
 
+class DeferredUnity:
+    """Unity scan inputs to retry after collecting type trees from other files."""
+
+    def __init__(self, args, trees):
+        self.args = args
+        self.trees = trees
+
 def scan_file(args):
-    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', first reason, files left out).
+    """→ (relative path, {key: …}, pairs, extra); extra = Unity type trees, a DeferredUnity scan, or ('unreadable', first reason, files left out).
     A file no reader can read (a format revision the reader does not know: its red line, or the exception it raised) is left out, and the split goes on: one such
     archive used to end the whole split with nothing written (PR #282: one of Mario Strikers: Battle League's 879 Next Level Games archives). main reports them"""
     try: return scan_file_in(args)
@@ -4738,6 +4897,73 @@ def fzlc_shaders(path, label):
         if len(p) != raw: red(f'{where} decompresses to {len(p)} bytes, its entry says {raw}')
         parts.append(p); at = end
     return glslc_shaders(b''.join(parts), label, need=False)
+
+def shadercache_nx_framing(d):
+    """The block framing of a RomFS shadercache.nx / startupshadercache.nx, or None when the file is not one. Two exist: version 13's blocks are
+    {u32 stored length, one zlib stream} (BioShock Remastered), version 28's are {u32 stored length, u32 raw length, one zlib stream} (BioShock 2 Remastered;
+    its raw length varies: 32 KiB in shadercache.nx, 30,178 B in startupshadercache.nx). The table is walked without inflating it: every stored length in range
+    (and raw length in range for v28), every block starting with a valid RFC 1950 zlib header, and the last block ending exactly at the file's end. Returns the
+    bytes before each block's stream (4 or 8)"""
+    if len(d) < 16: return None
+    ver, count = struct.unpack_from('<II', d, 0)
+    if not 1 <= ver <= 0x100 or not 1 <= count <= 1 << 20: return None
+    for word in (4, 8):
+        at, ok = 8, True
+        for _ in range(count):
+            if at + word > len(d): ok = False; break
+            stored, = struct.unpack_from('<I', d, at)
+            if word == 8:
+                raw, = struct.unpack_from('<I', d, at + 4)
+                if not 1 <= raw <= 1 << 24: ok = False; break
+            body = at + word
+            if stored < 8 or body + stored > len(d) or not _zlib_header(d, body): ok = False; break
+            at = body + stored
+        if ok and at == len(d): return word
+    return None
+
+def is_shadercache_nx(d): return shadercache_nx_framing(d) is not None
+
+def shadercache_nx(d, label, need=True):
+    """The NVN graphics programs of shadercache.nx / startupshadercache.nx (Blind Squirrel's Unreal Engine 3 Switch ports: BioShock Remastered v13, 5,557 zlib blocks
+    joining to 182,079,141 bytes / 20,419 distinct keys; BioShock 2 Remastered v28, 20,376 keys across shadercache.nx and startupshadercache.nx). Records are
+    {16-byte header: u32 control length, u32 code length, u32, u32}, code area, control section, and cross block boundaries (2,622 in BioShock Remastered), so blocks
+    are joined before scanning. The header's control length is the record's own (0x880..0x970, including per-record descriptors past 0x880), while NVN's control section
+    declares 0x880 at +0x20 and that is what the host hashes. A candidate control magic is accepted only when the header's code length matches, the code area starts with
+    GFX_MAGIC, and check() passes. When need=False (generic dispatch in scan_file_in), a valid chunked-zlib file with no NVN records returns [] instead of failing red"""
+    ver, count = field(d, '<II', 0, label)
+    word = shadercache_nx_framing(d)
+    if word is None: red(f'{label}: {ver} version, {count} blocks that do not fill the file')
+    parts, at = [], 8
+    for i in range(count):
+        where = f'{label}: block {i} at {at:#x}'
+        stored, = field(d, '<I', at, where)
+        raw = field(d, '<I', at + 4, where)[0] if word == 8 else None
+        body = span(d, at + word, stored, where)
+        if not _zlib_header(body, 0): red(f'{where}: {stored} stored bytes that are not a zlib stream')
+        try: part = zlib.decompress(body)
+        except zlib.error as e: red(f'{where}: invalid zlib stream ({e})')
+        if raw is not None and len(part) != raw: red(f'{where}: decompresses to {len(part)} bytes, its header says {raw}')
+        parts.append(part); at += word + stored
+    if at != len(d): red(f'{label}: {count} blocks end at {at:#x}, the file is {len(d):#x} bytes')
+    s = b''.join(parts)
+    out, off = [], 0
+    while (c := s.find(CTL_MAGIC, off)) >= 0:
+        off = c + 4
+        if c + 0x708 > len(s): break
+        n, = struct.unpack_from('<I', s, c + 0x704)
+        start = c - n
+        if n < 0x40 or start < 16: continue
+        nctl, ncode = struct.unpack_from('<II', s, start - 16)
+        if ncode != n or not 0x880 <= nctl <= 0x1000 or c + 0x880 > len(s): continue   # a control magic in code or descriptor bytes, not a record
+        code, ctl = s[start:c], s[c:c + 0x880]
+        if code[:4] != GFX_MAGIC: continue
+        st = sph_stage(code)
+        if st is None or st == 'cs': red(f'{label}#NXBLK@0x{c:x}: stage {st} with a graphics code area')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}#NXBLK@0x{c:x}: {why}')
+        out.append((f'{label}#NXBLK@0x{c:x}', st, ctl, code))
+    if not out and need: red(f'{label}: {ver} version, {count} blocks, no NVN record')
+    return out
 
 def scan_file_in(args):
     path, rel = args[:2]
@@ -4836,8 +5062,9 @@ def scan_file_in(args):
         d3cpk_shaders(path, rel, args[2][1], args[2][2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
-        cpk_shaders(path, rel, args[2], found)
-        return rel, uniq_keys(found), var_pairs(found), trees
+        pairs, deferred = cpk_shaders(path, rel, args[2], found, trees if not TREES else dict(TREES))
+        extra = DeferredUnity((path, rel, tuple(deferred)), trees) if deferred else trees
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, extra
     if len(args) > 2 and args[2][0] == MDB1:   # .shad entries of a Media.Vision MVGL archive (mvgl_jobs)
         if args[2][1] is None: red(args[2][2])
         mvgl_shaders(path, rel, args[2][1], args[2][2], found)
@@ -4878,7 +5105,12 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'BMSG' or ue3_package(head):   # an Unreal Engine 3 global shader cache or package (ue3_body, ue3_shaders)
         with open(path, 'rb') as f: d = f.read()
-        found += ue3_shaders(ue3_body(d, '/' + rel) if d[:4] == UE3_TAG else d, '/' + rel)
+        if d[:4] == UE3_TAG:
+            d = ue3_body(d, '/' + rel)
+            if os.path.basename(path).startswith('UniShaderBuffer-') and ext == '.upk':
+                found += ue3_shared_cache(d, path, rel)
+                return rel, uniq_keys(found), var_pairs(found), trees
+        found += ue3_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == RFRM:   # a Retro Studios form or pack (rfrm_shaders)
         from romfs import mmap   # mapped, not read: Metroid Prime 4's packs reach 3.9 GB and only their MTRL resources are looked at
@@ -4951,6 +5183,9 @@ def scan_file_in(args):
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
+    if is_shadercache_nx(d):   # BioShock Remastered / BioShock 2 Remastered RomFS shader cache: zlib blocks joined, then NVN records (shadercache_nx)
+        found = shadercache_nx(d, '/' + rel, need=False)
+        if found: return rel, uniq_keys(found), var_pairs(found), trees
     # Containers the generic prefilter below would drop, read whole by scan_blob: Monolith's, which it also ships loose, without an ARH/ARD archive (Xenoblade DE;
     # DRSM model streams contain several embedded XBC1 resources; DMPA model packages (.wimdo) keep plain HCPS programs beside the model: 18 of Xenoblade DE's, the only copy
     # of 14 shaders its Switch 2 Edition's prologue draws with), and Phyre's effects and FFX/X-2's loose programs, their two lengths before the code (phyre_shaders)
@@ -4966,10 +5201,10 @@ def scan_file_in(args):
             d = head_d if len(head_d) >= struct.unpack_from('<I', d, 10)[0] else xnb_decompress(d)
         else:
             d = xnb_decompress(d)
-    if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
+    if is_unity_asset(d):
         import unityfs
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
-        except unityfs.NoTree: return rel, {}, set(), 'defer'
+        except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
@@ -5172,17 +5407,18 @@ def main():
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
-        if extra == 'defer': defer.append(rel)
+        if isinstance(extra, DeferredUnity):
+            defer.append(extra.args)
+            trees.update(extra.trees)
         elif isinstance(extra, dict): trees.update(extra)
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
-        byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, defer))
         for rel, uniq, pr, extra in again:
-            if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
-        results = [r for r in results if r[3] != 'defer'] + again
+            if isinstance(extra, DeferredUnity): red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
+        results += again
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     play_pairs = set()
