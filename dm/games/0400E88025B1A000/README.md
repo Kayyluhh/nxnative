@@ -12,8 +12,6 @@ A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NV
 | `romfs_marker data.zip` | `game.tsv` | the RomFS has two files, and this is the game |
 | `zip_store .zip:.metallib` | `game.tsv` | the archive's members are LZ4-compressed already |
 | `shader_groups /data.zip=shader` | `game.tsv` | every shader is a member of the archive |
-| `romfs_file veclipse_build.cvar …` | `game.tsv` | the engine's cvar file with `render.resolution_scale_console` at 1.0, so the scene renders 1536x864 instead of 768x432 ([The picture](#the-picture)); [Files the profile serves in the RomFS](../../../docs/reference/services.md#files-the-profile-serves-in-the-romfs) |
-| [`pso_manifest.tsv`](pso_manifest.tsv) | profile | the pipelines the first Mac sessions built (boot, the title, the opening cutscene, the training and about half an hour after it): the cutscene's first-use stalls went from 36 frames (12.5 s in all) to 1 (54 ms) |
 | `depth_mode zero` | `game.tsv` | the game sets near = 0 before its first frame, so the offline archive and Mac prebuild use the near-zero vertex entries ([measurement](#found-on-this-game)) |
 
 There is no game-specific patch, and only v131072's build row. Base v0 (main build ID `898024ffa42c059518eb38196f1ee0f635ecdf89`) has a startup report from an M4 Max (macOS 27.2.1, 2026-11-21): its guest input loop exposed a missing streamplay HID feature getter, and with the general host fix the PR #3162 author verified startup and played from an existing save through to Andross once. A fresh-save route, later gameplay and other titles remain unchecked.
@@ -58,14 +56,6 @@ Create a folder outside the repository with this `veclipse_build.cvar` file in i
 
 On a display running at 3840x2160 or higher, add `DM_OPMODE=1 DM_ROMFS_OVERLAY="/absolute/path/to/overlay"` to the Mac run command. The overlay leaves the original RomFS files intact. The reporter measured 60 fps in the title and early gameplay on an M4 Max, with the game's 30 fps cinematic segments. Later levels at native 4K remain untested. [Issue #2895](https://github.com/seedds/nxnative/issues/2895)
 
-- Resolution (current, measured before the host answered graphics scale tier 0): the engine renders the scene at `render.resolution_scale_console` of the 1920x1080 it presents, and its default docked is 0.4: 768x432, which MetalFX stands in for DLSS at (768x432 to 768x432, the network resized to the scene's size) and the game's NDSR compute networks then stretch to 1536x864 and the swap chain to 1920x1080 (the top-left of its 3840x2160), soft on a large screen. `render.dynres_enabled` false changed nothing: the size is the scale, not dynamic resolution. The profile serves the engine's cvar file with 1.0, and the engine renders 1536x864 (its own cap); the cutscene's GPU time went from 6.7 to 7.3 ms (p50) on an M-series Mac. Whether a console renders 0.4 too is not known. `DM_ROMFS_FILES=0` gives the game's own scale back.
-- Lighting is clustered: a grid of light cells in `c8` and 80-byte light records in `c16`. Two guarded loads of one cell word on two write barriers once hung the GPU about 190 s into the opening cutscene ([A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard), resolved).
-
-## Frame rate and sound timing
-
-- The cutscenes run at 30 fps (present interval 2) and gameplay at 60.
-- In variable-refresh fullscreen a frame of the 30 fps cutscenes was shown 128 ms (p50) after the game queued it, and the gunfire and engines were heard before they were seen; with frame latency 1 for a 30 Hz link it is 57-80 ms ([Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen)), and the sound is held back by that measured delay ([Sound held back for the picture](../../../docs/reference/audio.md#sound-held-back-for-the-picture)). The delay has not been heard or measured with the window in front.
-
 ## Driving it on the Mac
 
 `python3 scripts/build_ipa_from_nsp.py <folder> --platform mac` builds the Mac shaders and the host and prints the run command. Headless, through `DM_CTL`: the title is up about 40 s after boot and `A` starts the game. The prologue cinematic follows, about 4 minutes on every run (a save holds no progress yet, and skipping it was not tried), then the tutorial's first question, about 300 s after boot: `LDown`, `A` answers no. Before the VI fix, shots of the 3840x2160 swapchain showed the 1920x1080 picture in the top-left quarter. A `shot` takes about 165 ms: a hitch every few seconds in a run that takes them is the shot's.
@@ -74,11 +64,6 @@ DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_K
 
 ## Found on this game
 
-- [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): the GPU hang in the opening cutscene (resolved).
-- [Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen) and [Sound held back for the picture](../../../docs/reference/audio.md#sound-held-back-for-the-picture): sound ahead of the picture in the 30 fps cutscenes.
-- [A controller that reconnects under another name](../../../docs/reference/services.md#a-controller-that-reconnects-under-another-name): the game ignored an Xbox controller that came back as player 2 (resolved).
-- [Files the profile serves in the RomFS](../../../docs/reference/services.md#files-the-profile-serves-in-the-romfs): the console resolution scale.
-- [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx): the bias mask.
 - **Resolved.** On NX18, the v131072 Mac app on an M4 Max (`applegpu_g16s`) refused its 66.5 MB archive stamped near = −w. The first launch built 1,483 pipeline bases in 6.3 s and reached its first frame in 6.6 s. With `depth_mode zero` the archive rebuilt in 12 s from the same build folder, the host found 16 of 16 probed bases, and the first frame came at 1.4 s. [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree) · [NX18 measurement](https://github.com/kencalx/NX18/commit/72c84bd43102129eefcd83ad8729495d832f75df)
 - [GameShare HID feature query opens the service](../../../docs/reference/services.md#gameshare-hid-feature-query-opens-the-service): base v0 startup abort.
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
