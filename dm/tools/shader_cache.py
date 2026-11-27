@@ -10,13 +10,8 @@
 # one file it would be two copies, so bytes are stored by their hash. A file removed from the cache gives its pages back at the next prune (incremental vacuum), with no copy of the file.
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
-# Compressed files (DMSH_CAS_ZSTD=1, the NSP script's --compress-shader-cache; the format of PR #2390): the bytes are in _blob_zstd, each a zstd frame without its four-byte magic
-# (_data_dict -1; NULL: stored as they are), and blob is a view that gives them back whole, so every statement that reads blob works on either kind of file. A file made while the
-# switch is on starts compressed and every entry is compressed as it is written, so a first build never holds the raw bytes (Pokemon Pokopia's whole map: about 58 GiB raw, 21
-# compressed). A file stays compressed whatever the switch says later; convert() changes an existing file either way. Code from before this cannot read such a file: its reads fail
-# on the missing zstd_decompress_col function instead of taking compressed bytes for a library.
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
-import collections, concurrent.futures, contextlib, fcntl, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
+import contextlib, fcntl, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
 from pathlib import Path
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
@@ -29,69 +24,6 @@ READ_ONLY = None   # set only by --run: the harness supplies this module to olde
 GENERATION = re.compile(r'cas-([0-9a-f]{12})\.db')   # a chain's file in a cache folder
 LEGACY = 'cas.db'   # the one file of every chain, from before generations
 TARGETS = ('mac', 'ios')   # metallib/<target>/
-COMPRESS_ENV = 'DMSH_CAS_ZSTD'   # =1: a cache file this process makes starts compressed
-ZLEVEL = 3   # zstd's default level: Ocarina of Time's cache 25.3 → 12.7 GiB, Pokopia's 58.4 → 21.1 GiB (PR #2390), at hundreds of MB/s a core
-_MAGIC = b'\x28\xb5\x2f\xfd'   # every zstd frame's first four bytes, which the stored form leaves out
-
-
-def _zstd():
-    try: from compression import zstd   # Python 3.14
-    except ImportError:
-        try: from backports import zstd   # pyright: ignore[reportMissingImports]  # pip install backports.zstd, before 3.14
-        except ImportError: return None
-    return zstd
-
-
-ZSTD = _zstd()
-
-
-def _need_zstd():
-    if ZSTD is None: raise RuntimeError('a compressed shader compile cache needs Python 3.14 or backports.zstd (pip install backports.zstd)')
-    return ZSTD
-
-
-def pack(data):
-    """bytes as a compressed file stores them: a zstd frame without its magic"""
-    return _need_zstd().compress(data, level=ZLEVEL)[4:]
-
-
-def unpack(stored, marker):
-    """the bytes of a _blob_zstd row: its data as it is when marker is NULL (stored as they are), else the frame it holds"""
-    return stored if marker is None else _need_zstd().decompress(_MAGIC + stored)
-
-
-def _functions(db):
-    """The SQL functions a compressed file's view and triggers name (PR #2390's signatures). Every connection gets them; without zstd only a compressed file fails, when it is read"""
-    if ZSTD is None: return db
-    def compress(data, level, dictionary, compact):
-        if (level, dictionary, compact) != (ZLEVEL, -1, 1): raise ValueError('unsupported shader cache compression parameters')
-        return pack(data)
-    def decompress(data, is_text, dictionary, compact):
-        if dictionary is None: return data
-        if (is_text, dictionary, compact) != (0, -1, 1): raise ValueError('unsupported shader cache dictionary or encoding')
-        return unpack(data, dictionary)
-    db.create_function('zstd_compress_col', 4, compress, deterministic=True)
-    db.create_function('zstd_decompress_col', 4, decompress, deterministic=True)
-    return db
-
-
-def _is_compressed(db, schema='main'): return db.execute(f"SELECT type FROM {schema}.sqlite_master WHERE name='blob'").fetchone() == ('view',)
-
-
-# The insert trigger compresses, so a statement that writes blob (take) stores the frame; PR #2390's stored the bytes as they are and compressed them after the build
-_INSERT = (f'CREATE TRIGGER blob_insert_trigger INSTEAD OF INSERT ON blob BEGIN INSERT OR IGNORE INTO _blob_zstd(id,hash,data,_data_dict) '
-           f'VALUES(new.id,new.hash,zstd_compress_col(new.data,{ZLEVEL},-1,1),-1); END')
-
-
-def _make_compressed(db):
-    """A raw file's tables, still empty, as a compressed file's (PR #2390's _enable_compression, with the compressing insert trigger)"""
-    db.execute('ALTER TABLE blob RENAME TO _blob_zstd')
-    db.execute('ALTER TABLE _blob_zstd ADD COLUMN _data_dict INTEGER')
-    db.execute('CREATE VIEW blob AS SELECT id,hash,zstd_decompress_col(data,0,_data_dict,1) AS data FROM _blob_zstd')
-    db.execute(_INSERT)
-    db.execute('CREATE TRIGGER blob_delete_trigger INSTEAD OF DELETE ON blob BEGIN DELETE FROM _blob_zstd WHERE id=old.id; END')
-    db.execute('CREATE TRIGGER blob_update_trigger INSTEAD OF UPDATE ON blob BEGIN UPDATE _blob_zstd SET id=new.id,hash=new.hash,data=zstd_compress_col(new.data,'
-               f'{ZLEVEL},-1,1),_data_dict=-1 WHERE id=old.id; END')
 
 
 def generations(folder):
@@ -113,7 +45,7 @@ class _ReadOnly:
         self.say, self.lock, self.prefixes, self.dbs = say, threading.RLock(), prefixes, []
         for p in map(os.fspath, paths):
             if not os.path.isfile(p): continue
-            try: self.dbs.append((p, _functions(sqlite3.connect(Path(p).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None))))
+            try: self.dbs.append((p, sqlite3.connect(Path(p).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)))
             except sqlite3.Error as e: self.say(f'[RED] the read-only shader cache {p} cannot be read and is ignored: {e}')
 
     def _failed(self, i, e):
@@ -171,13 +103,10 @@ class _Files:   # an entry from or to a file, by get and put
 
 
 class Store(_Files):
-    def __init__(self, path, say=print, *, readonly=None, older=(), compress=None):
+    def __init__(self, path, say=print, *, readonly=None, older=()):
         """readonly: another cache (a file, or a cache folder's generations) whose shared entries are read, never copied (regress.py's fallback to the player's).
-        older: the files of earlier generations of this one (for_chain), whose Metal compiles are copied into this file when they are read.
-        compress: whether a file this makes starts compressed (default: DMSH_CAS_ZSTD=1); a file that exists keeps its kind"""
+        older: the files of earlier generations of this one (for_chain), whose Metal compiles are copied into this file when they are read"""
         self.path, self.say = os.fspath(path), say
-        self.want_compress = os.environ.get(COMPRESS_ENV) == '1' if compress is None else compress
-        self.compressed = False
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
         self.readers, self.wal, self.opener = {}, False, threading.get_ident()   # each other thread's own connection for get, read-only (_reader), where the file's log lets a reader stand beside the writer
         self.full = False   # set by the first write that fails (a full drive): no later write is tried, and the batch it was part of is rolled back
@@ -197,10 +126,7 @@ class Store(_Files):
         self.older = _ReadOnly(older, say, ('metallib/',)) if older else None
         self._open()
 
-    def _connect(self): return _functions(sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None))
-
-    @property
-    def _stored(self): return '_blob_zstd' if self.compressed else 'blob'   # the table that holds the bytes as stored: their sizes are the file's, and nothing is decompressed to count them
+    def _connect(self): return sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
 
     def _open(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
@@ -222,27 +148,7 @@ class Store(_Files):
         # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
         self.wal = self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
         self.db.execute('PRAGMA synchronous=NORMAL' if self.wal else 'PRAGMA synchronous=OFF')
-        self.compressed = _is_compressed(self.db)
-        if self.compressed:
-            _need_zstd()
-            # A file PR #2390's code compressed has a trigger that stores the bytes as they are: this one compresses them (put writes the table itself)
-            sql = self.db.execute("SELECT sql FROM sqlite_master WHERE name='blob_insert_trigger'").fetchone()
-            if not sql or sql[0] != _INSERT:
-                with self.lock:
-                    self.db.execute('BEGIN IMMEDIATE')
-                    try: self.db.execute('DROP TRIGGER IF EXISTS blob_insert_trigger'); self.db.execute(_INSERT); self.db.commit()
-                    except BaseException: self.db.rollback(); raise
-            return
         for s in SCHEMA: self.db.execute(s)
-        if self.want_compress and not self.db.execute('SELECT 1 FROM blob LIMIT 1').fetchone():   # a new (or empty) file starts compressed
-            _need_zstd()
-            with self.lock:
-                self.db.execute('BEGIN IMMEDIATE')
-                try:
-                    if not _is_compressed(self.db) and not self.db.execute('SELECT 1 FROM blob LIMIT 1').fetchone(): _make_compressed(self.db)
-                    self.db.commit()
-                except BaseException: self.db.rollback(); raise
-            self.compressed = _is_compressed(self.db)
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False
@@ -276,7 +182,7 @@ class Store(_Files):
             if me != self.opener and self.wal and not self.outer and not self.db.in_transaction:
                 reader = self.readers.get(me)
                 if reader is None:
-                    try: db = _functions(sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None))
+                    try: db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
                     except sqlite3.Error: pass
                     else: reader = self.readers[me] = (db, threading.RLock())
                 if reader: reader[1].acquire()   # reserve under the registry lock: recovery cannot retire it before the query begins
@@ -307,16 +213,11 @@ class Store(_Files):
         """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it, and the batch this write was part of is rolled back"""
         if self.full: return   # inside a failed batch, a write would land outside it: SQLite may have rolled the transaction back already
         digest = hashlib.blake2b(data, digest_size=16).digest()
-        # A compressed file's frame is made before the lock, so the threads and the workers' serving threads compress side by side: the one connection only stores it
-        stored = pack(data) if self.compressed else None
         with self.lock:
-            if self.compressed and stored is None: stored = pack(data)   # the file was made anew compressed (_damage) while this waited
             try:
                 with self.batch():
-                    row = self.db.execute(f'SELECT id FROM {self._stored} WHERE hash=?', (digest,)).fetchone()
-                    if row: blob = row[0]
-                    elif self.compressed: blob = self.db.execute('INSERT INTO _blob_zstd(hash, data, _data_dict) VALUES(?, ?, -1)', (digest, stored)).lastrowid
-                    else: blob = self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
+                    row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
+                    blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
                     self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
             except sqlite3.OperationalError as e: self._unwritable(e)
             except sqlite3.DatabaseError as e:
@@ -364,11 +265,11 @@ class Store(_Files):
         if not gone: return 0, 0
         size = {}
         for d in gone:
-            size[d] = sum(n for name, n in self._run(f'SELECT e.name, length(b.data) FROM entry e JOIN {self._stored} b ON b.id=e.blob WHERE e.name>=? AND e.name<?', f'shader/{d}/', f'shader/{d}0')
+            size[d] = sum(n for name, n in self._run('SELECT e.name, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>=? AND e.name<?', f'shader/{d}/', f'shader/{d}0')
                           if not name.endswith('.metallib'))
         with self.lock, self.batch():
             self.db.executemany('DELETE FROM entry WHERE name=?', ((n,) for d in gone for n in names[d]))
-            self.db.execute(f'DELETE FROM {self._stored} WHERE id NOT IN (SELECT blob FROM entry)')
+            self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
         self._run('PRAGMA incremental_vacuum')
         return len(gone), sum(size.get(d, 0) for d in gone)
 
@@ -377,11 +278,11 @@ class Store(_Files):
         per-shader hit cache (the Mac sources, reflection and the entries' own copies of the libraries) which only a later build of the same chain reads; metallib/ and variant/ stay, and so does anything written since.
         Returns (shaders removed, bytes of their sources and reflection and of the index entries: the libraries are shared with metallib/)"""
         n, size = self.prune_shaders(set(), since)
-        rows = self._run(f"SELECT e.name, length(b.data) FROM entry e JOIN {self._stored} b ON b.id=e.blob WHERE e.name>='index/' AND e.name<'index0' AND e.mtime<?", since)
+        rows = self._run("SELECT e.name, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>='index/' AND e.name<'index0' AND e.mtime<?", since)
         if rows:
             with self.lock, self.batch():
                 self.db.executemany('DELETE FROM entry WHERE name=? AND mtime<?', ((name, since) for name, _ in rows))
-                self.db.execute(f'DELETE FROM {self._stored} WHERE id NOT IN (SELECT blob FROM entry)')
+                self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
             self._run('PRAGMA incremental_vacuum')
         return n, size + sum(k for _, k in rows)
 
@@ -391,7 +292,7 @@ class Store(_Files):
             try:
                 with self.batch():
                     self.db.execute('DELETE FROM entry WHERE name>=? AND name<?', (prefix, prefix + '\U0010ffff'))
-                    self.db.execute(f'DELETE FROM {self._stored} WHERE id NOT IN (SELECT blob FROM entry)')
+                    self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
             except sqlite3.DatabaseError as e:
                 if not self._damage(e): raise
         self._run('PRAGMA incremental_vacuum')
@@ -405,17 +306,9 @@ class Store(_Files):
             self.db.execute('ATTACH DATABASE ? AS old', (os.fspath(path),))
             try:
                 with self.batch():
-                    # Either file may be compressed. Between two compressed files the frames are copied as they are; into a compressed file from a raw one they are made by the view's
-                    # insert trigger; out of a compressed file into a raw one, old.blob gives the bytes back whole. hash is of the bytes whole in every file, so it joins them all
-                    old_z, sel = _is_compressed(self.db, 'old'), 'FROM old.entry e JOIN old.blob b ON b.id=e.blob WHERE e.name>=? AND e.name<?'
-                    if self.compressed and old_z:
-                        self.db.execute('INSERT OR IGNORE INTO main._blob_zstd(hash, data, _data_dict) SELECT b.hash, b.data, b._data_dict FROM old.entry e JOIN old._blob_zstd b ON b.id=e.blob '
-                                        'WHERE e.name>=? AND e.name<? AND b.hash NOT IN (SELECT hash FROM main._blob_zstd)', (prefix, hi))
-                    elif self.compressed:
-                        self.db.execute('INSERT INTO main.blob(hash, data) SELECT b.hash, b.data ' + sel + ' AND b.hash NOT IN (SELECT hash FROM main._blob_zstd)', (prefix, hi))
-                    else: self.db.execute('INSERT OR IGNORE INTO main.blob(hash, data) SELECT b.hash, b.data ' + sel, (prefix, hi))
-                    n = self.db.execute(f'INSERT OR IGNORE INTO main.entry(name, blob, mtime) SELECT e.name, m.id, e.mtime FROM old.entry e JOIN old.{"_blob_zstd" if old_z else "blob"} b ON b.id=e.blob '
-                                        f'JOIN main.{self._stored} m ON m.hash=b.hash WHERE e.name>=? AND e.name<?', (prefix, hi)).rowcount
+                    self.db.execute('INSERT OR IGNORE INTO main.blob(hash, data) SELECT b.hash, b.data FROM old.entry e JOIN old.blob b ON b.id=e.blob WHERE e.name>=? AND e.name<?', (prefix, hi))
+                    n = self.db.execute('INSERT OR IGNORE INTO main.entry(name, blob, mtime) SELECT e.name, m.id, e.mtime FROM old.entry e JOIN old.blob b ON b.id=e.blob JOIN main.blob m ON m.hash=b.hash '
+                                        'WHERE e.name>=? AND e.name<?', (prefix, hi)).rowcount
             finally: self.db.execute('DETACH DATABASE old')
         return 0 if self.full else n
 
@@ -444,9 +337,9 @@ class Store(_Files):
         self._run('PRAGMA incremental_vacuum')
         before = os.path.getsize(self.path)
         if before <= limit: return 0
-        with self.batch(): self.db.execute(f'DELETE FROM {self._stored} WHERE id NOT IN (SELECT blob FROM entry)')
+        with self.batch(): self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
         self._run('PRAGMA incremental_vacuum'); self._run('PRAGMA wal_checkpoint(TRUNCATE)')
-        rows = self._run(f'SELECT e.name,e.blob,e.mtime,length(b.data) FROM entry e JOIN {self._stored} b ON b.id=e.blob')
+        rows = self._run('SELECT e.name,e.blob,e.mtime,length(b.data) FROM entry e JOIN blob b ON b.id=e.blob')
         groups, refs, sizes = {}, {}, {}
         for name, blob, when, size in rows:
             parts = name.split('/')
@@ -467,7 +360,7 @@ class Store(_Files):
             if not names: break
             with self.batch():
                 self.db.executemany('DELETE FROM entry WHERE name=?', names)
-                self.db.execute(f'DELETE FROM {self._stored} WHERE id NOT IN (SELECT blob FROM entry)')
+                self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
             removed += len(names)
             self._run('PRAGMA incremental_vacuum'); self._run('PRAGMA wal_checkpoint(TRUNCATE)')
         self.say(f'regression shader cache: removed {removed:,} entries, {before / (1 << 30):.2f} → {os.path.getsize(self.path) / (1 << 30):.2f} GiB (limit {limit / (1 << 30):.2f} GiB)')
@@ -681,76 +574,6 @@ def drop_generations(folder, chain, say=print, remove=None):
         gone.append(os.path.basename(p)); size += n
     if gone: say(f'removed old shader compile caches {", ".join(gone)} ({size / 1e9:.2f} GB){" to obsolete/" if remove else ""}')
     return gone
-
-
-def convert(path, compress=True, say=print, workers=None):
-    """An existing cache file made compressed (compress) or raw again, with every entry, its bytes and its time kept. The new file is written beside it (<path>.convert.part: the
-    compressed size beside the raw file, the drive's peak of the conversion) and replaces it only when whole, so a stop or a full drive leaves the old one. Refused while another
-    connection has the file open: SQLite leaves the write-ahead log only for the one connection there is (every store keeps the file in it), and the exclusive lock taken then is held
-    until the new file is in place, so a build that starts meanwhile waits, then finds the new file (its first write sees the old one moved and opens the file again: _open).
-    Returns (bytes before, bytes after), or None when the file is already of that kind"""
-    path = os.fspath(path)
-    if not os.path.isfile(path): raise FileNotFoundError(f'no shader compile cache at {path}')
-    _need_zstd()
-    workers = workers or os.cpu_count() or 1
-    part = path + '.convert.part'
-    src = _functions(sqlite3.connect(path, timeout=0, isolation_level=None))
-    try:
-        if _is_compressed(src) == compress: return None
-        try:
-            src.execute('PRAGMA journal_mode=DELETE').fetchone()   # folds the log into the file: only with no other connection
-            src.execute('PRAGMA locking_mode=EXCLUSIVE'); src.execute('BEGIN EXCLUSIVE')
-        except sqlite3.OperationalError as e:
-            if 'locked' not in str(e) and 'busy' not in str(e): raise
-            raise RuntimeError(f'the shader compile cache {path} is in use by a build; convert it when no build runs') from None
-        before = _file_size(path)
-        say(f'{"compressing" if compress else "restoring the raw form of"} the shader compile cache {path} ({before / 1e9:.2f} GB)')
-        for x in ('', '-journal'):
-            with contextlib.suppress(FileNotFoundError): os.unlink(part + x)
-        try:
-            out = _functions(sqlite3.connect(part, isolation_level=None))
-            try:
-                out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL'); out.execute('PRAGMA journal_mode=OFF'); out.execute('PRAGMA synchronous=OFF')
-                for x in SCHEMA: out.execute(x)
-                if compress: _make_compressed(out)
-                insert = 'INSERT INTO _blob_zstd(id, hash, data, _data_dict) VALUES(?, ?, ?, ?)' if compress else 'INSERT INTO blob(id, hash, data) VALUES(?, ?, ?)'
-                table = 'blob' if compress else '_blob_zstd'   # the source's stored rows
-                def rows(last=0):   # batches of about 8 MB in id order
-                    while True:
-                        got, size = [], 0
-                        for row in src.execute(f'SELECT id, hash, data{"" if compress else ", _data_dict"} FROM {table} WHERE id>? ORDER BY id LIMIT 256', (last,)):
-                            got.append(row); last = row[0]; size += len(row[2])
-                            if size >= 8 << 20: break
-                        if not got: return
-                        yield got
-                def work(batch): return [(i, h, pack(bytes(d)), -1) for i, h, d in batch] if compress else [(i, h, unpack(bytes(d), m)) for i, h, d, m in batch]
-                out.execute('BEGIN')
-                with concurrent.futures.ThreadPoolExecutor(workers) as pool:   # zstd lets go of the interpreter while it works: the batches compress on every core
-                    ahead = collections.deque()
-                    for batch in rows():
-                        ahead.append(pool.submit(work, batch))
-                        if len(ahead) >= 2 * workers: out.executemany(insert, ahead.popleft().result())
-                    while ahead: out.executemany(insert, ahead.popleft().result())
-                out.executemany('INSERT INTO entry(name, blob, mtime) VALUES(?, ?, ?)', src.execute('SELECT name, blob, mtime FROM entry'))
-                out.commit()
-                out.execute('PRAGMA journal_mode=DELETE')
-            finally: out.close()
-            os.replace(part, path)   # under the exclusive lock, which closing the old file's connection then gives up
-        except BaseException:
-            for x in ('', '-journal'):
-                with contextlib.suppress(FileNotFoundError): os.unlink(part + x)
-            raise
-        src.rollback(); src.close(); src = None
-        after = _file_size(path)
-        say(f'shader compile cache {path}: {before / 1e9:.2f} → {after / 1e9:.2f} GB')
-        return before, after
-    finally:
-        if src is not None: src.close()
-
-
-def convert_folder(folder, compress=True, say=print, workers=None):
-    """convert() for every generation of a cache folder (cas-<chain>.db, cas.db). Returns [(file, (before, after))] for those it changed"""
-    return [(p, r) for p in generations(folder) if (r := convert(p, compress, say, workers))]
 
 
 def main():

@@ -42,7 +42,6 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 
 ## Found on this game
 
-- [A large map's compile cache took most of the build's disk](../../../docs/reference/packing.md#a-large-maps-compile-cache-took-most-of-the-builds-disk): the partial Mac build's cache (chain `cf3be507e0eb`, 10,090 keys) compresses from 5.73 to 1.87 GB with zstd level 3, measured read-only on 2026-11-18 in 10 s on 12 threads; `--compress-shader-cache` keeps it so from the first entry (current). A full build with it has not run yet (open).
 - [Separate DLC for a NUP](../../../docs/reference/packing.md#separate-dlc-for-a-nup): the build omitted the marker add-on (resolved).
 - [An iOS build stops when the profile has no prewarm seed list](../../../docs/reference/packing.md#an-ios-build-stops-when-the-profile-has-no-prewarm-seed-list): the framework packaging step required an optional recorded list (resolved).
 

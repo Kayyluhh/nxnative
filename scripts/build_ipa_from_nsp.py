@@ -75,8 +75,6 @@ LANGUAGE = ''                           # game language, a code or a name: 'ja',
                                         #   DM_LANG=<code> in the app's Documents/env.txt changes it without a rebuild
 KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them
 SLIM_CACHE = False                      # after a successful shader build also remove the compile cache's per-shader entries (shader/, index/ of shader/cache/cas-<chain>.db: 4.7 GB of 11.4 GB for a Mac build of The Legend of Zelda: Ocarina of Time) that only a later build of the same chain reads; it then translates again, compiling nothing the cache's metallib/ holds. False keeps them
-COMPRESS_SHADER_CACHE = False           # keep the shader compile cache (shader/cache/cas-<chain>.db) compressed, each entry as it is written: Pokemon Pokopia's whole map about 21 instead of 58 GiB, Ocarina of Time's 12.7 instead of 25.3,
-                                        #   including at the build's peak; a cache an earlier build left raw is converted first. True keeps it so; scripts/compress_shader_cache.py converts a build folder's cache either way
 DM_ENV_FILE = ''                        # optional: environment switches for a diagnostic build (one KEY=VALUE per line)
 SEEN_SHADERS = False                    # PLATFORM 'mac' / 'mac-app': build only the shaders the profile's playtests used (shader_seen.tsv) and those the last runs' logs reported missing, not the whole map; areas the list does not cover draw without the rest until this runs again
 PREBAKE = True                          # PLATFORM 'mac-app', NVN games: also make the prewarm list's pipelines here, on this Mac (the host's prebuild tool, DM_PSO_PREBUILD=tool), and bundle them with the app after the pipeline archive,
@@ -2768,7 +2766,7 @@ def ios_wants_pulling(g, gpus, prepare_xcode, env):
     return (env.get('IOS_PULL') or '1') == '1'
 
 
-def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None, pull=None, slim=False, compress=False):
+def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None, pull=None, slim=False):
     """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
     them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, the translator's bytes, profile and compilers are as at the last successful build:
     dmsh_build.py would only restore every shader from its cache (63,000 for Breath of the Wild: about 100 s). The key of the iOS libraries is sh/ios/b-<chain>.key, that of the Mac's
@@ -2780,8 +2778,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     seen (--seen-shaders, a Mac-only build): only those keys, into sh/partial/b-<chain>, emptied first, with its key inside; the full build's libraries, its key and the cache are left as they are, and the
     per-shader cache (DMSH_CAS) is the full build's, so a later full build reuses this work. It gets no stamp and no c1_full.tsv or cb_extent.tsv, on purpose: beside a stamp the host would take the tables'
     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)
-    pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them
-    compress (COMPRESS_SHADER_CACHE / --compress-shader-cache): the chain's compile cache file compressed, each entry as it is written (shader_cache.py); one this chain's builds left raw is converted first"""
+    pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them"""
     ios, log = sh / 'ios', logs / 'dmsh_build.log'
     PROG.stage('Mac shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)
@@ -2795,12 +2792,6 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if misplaced.is_file():
         misplaced.rename(cache / shader_cache.LEGACY)
     shader_cache.adopt(cache / 'cas', shader_cache.chain_file(cache, chain), say)
-    if compress:
-        env = dict(env, **{shader_cache.COMPRESS_ENV: '1'})   # a file dmsh_build.py makes starts compressed
-        PROG.set(step='compressing the shader compile cache')
-        try: shader_cache.convert(shader_cache.chain_file(cache, chain), True, say)
-        except FileNotFoundError: pass   # this chain's first build: the file starts compressed
-        except (OSError, RuntimeError, shader_cache.sqlite3.Error) as e: say(f'[RED] the shader compile cache stays uncompressed for this build: {e}')
     out = sh / 'partial' if seen else sh / 'cache' if mac else ios
     libs, kf, kmac = out / f'b-{chain}', ios / f'b-{chain}.key', out / 'key' if seen else sh / f'mac-b-{chain}.key'
     pso_pairs, geo_pairs = (side_table(g, sh / 'pkg', n) for n in SPLIT_SIDE_TABLES)   # the split's copies are shader inputs too (vs_pad, dmsh_chain.mesh_pairs)
@@ -3352,8 +3343,6 @@ def parse_args(argv):
                     '--no-prebake: the app builds them on its first start (default: the PREBAKE setting, on)')
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')
-    ap.add_argument('--compress-shader-cache', action=argparse.BooleanOptionalAction, help='keep the shader compile cache compressed, each entry as it is written, so a large map (Pokemon Pokopia) needs about a third of the disk at its peak; '
-                    'an existing raw cache is converted first (default: the COMPRESS_SHADER_CACHE setting, off)')
     ap.add_argument('--slim-cache', action=argparse.BooleanOptionalAction, help='after a successful shader build also remove the compile cache\'s per-shader entries (shader/, index/) that only a later build of the same chain reads, for the disk space (default: the SLIM_CACHE setting, off)')
     ap.add_argument('--glslc-play', action='append', metavar='DIR', help='NVN games: add outputs saved with DM_GLSLC_CAPTURE while playing this version of the game. May be repeated.')
     ap.add_argument('--nvn-runtime', action='store_true', help='With --platform mac, translate NVN1 vertex and pixel shaders missing from the shader map on first use.')
@@ -3841,8 +3830,7 @@ def main(args=None):
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute, glslc_play=play)
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app), seen_lists(work, app)) if seen_shaders else None
-        ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env), SLIM_CACHE if args.slim_cache is None else args.slim_cache,
-                            COMPRESS_SHADER_CACHE if args.compress_shader_cache is None else args.compress_shader_cache)
+        ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env), SLIM_CACHE if args.slim_cache is None else args.slim_cache)
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
     if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
