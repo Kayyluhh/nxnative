@@ -12,7 +12,6 @@
 // with the saved choices; so does "Show this window at launch" turned off.
 #include <CoreFoundation/CoreFoundation.h>
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -168,28 +167,6 @@ static void microphone_at_launch(void) {
     if (value) CFRelease(value);
 }
 
-// RomFS tweaks (docs/settings.md, Decoration distance): Resources/dm/tweaks/<VAR>/<value>/ holds copies of game files the packer rewrote from this game's own RomFS for one value
-// of a setting (dm/tools/romfs_tweaks.py, the profile's romfs_tweaks.tsv). The chosen value's folder joins DM_ROMFS_OVERLAY after any folder already there, so an overlay the
-// player set in an env file or the launch environment still wins; a value with no folder (the default) adds nothing
-static void romfs_tweaks(const char *dm) {
-    char root[PATH_MAX]; snprintf(root, sizeof root, "%s/tweaks", dm);
-    DIR *d = opendir(root); if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.' || strncmp(e->d_name, "DM_", 3)) continue;
-        const char *v = getenv(e->d_name);
-        if (!v || !*v || *v == '.' || strchr(v, '/') || strchr(v, ':')) continue;   // a folder name, never a path
-        char dir[PATH_MAX]; struct stat st;
-        if (snprintf(dir, sizeof dir, "%s/%s/%s", root, e->d_name, v) >= (int)sizeof dir || stat(dir, &st) || !S_ISDIR(st.st_mode)) continue;
-        if (strchr(dir, ':')) { fprintf(stderr, "[RED] launcher: RomFS tweak %s=%s not used: the app's path has a ':', which DM_ROMFS_OVERLAY separates folders with\n", e->d_name, v); continue; }
-        const char *cur = getenv("DM_ROMFS_OVERLAY"); char *joined;
-        if (asprintf(&joined, "%s%s%s", cur && *cur ? cur : "", cur && *cur ? ":" : "", dir) < 0) continue;
-        setenv("DM_ROMFS_OVERLAY", joined, 1); free(joined);
-        fprintf(stderr, "launcher: RomFS tweak %s=%s (%s)\n", e->d_name, v, dir);
-    }
-    closedir(d);
-}
-
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -251,7 +228,6 @@ int main(int argc, char **argv) {
     if (shown == 2) saved_choices();
     cloud_saves_folder();
     microphone_at_launch();
-    romfs_tweaks(dm);
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Pictures/nxnative/%s", home, id); setenv("DM_ALBUM_DIR", p, 0);   // local album screenshots (hle_album.c); created lazily on first save
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
