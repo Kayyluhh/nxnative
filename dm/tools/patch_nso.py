@@ -1508,7 +1508,7 @@ obs += region_obs
 # a late frame, so motion is even and game time = real time. The steps stay values the games' own logic uses (1 to 3). Age of Calamity's updates are not held by the presents:
 # its stubs run them at the cap, and the host only paces its presents (its patches.py).
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
-# runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x14 float its upscale rate 1 / scale (Donkey Kong Bananza; 0 at 1.0), +0x18 double game seconds (TOTK),
+# runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
 # +0x20 u32 step in vsyncs, or in the unit at +0x38 (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
 # its first stub (0 = off), +0x30 u64 units stepped (the stubs; logged by the host to check the game's speed), +0x38 u32 the step's unit in ticks a second: 120 for a stub that
 # declares the FRAME_STEP_120 capability (Ocarina of Time's ratio stub; written by the loader, fixed for the run), 0 = vsyncs of 1/60 s, +0xa0 float frame time in seconds (host; 0 = at the target)
