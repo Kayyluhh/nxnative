@@ -783,24 +783,87 @@ static void repeated_archive_miss(void) {
     nvn_hm_clear(&g_pbase_miss, hm_rel);
 }
 
-// An app's folder of Metal's build folders (ga_claim): a start with no other copy running lists the earlier runs' folders; a copy started beside it lists none; and once the first
-// exits, a third start still lists none while the second runs, whose folders are live. Each claim opens the lock anew, and flock locks of separate opens conflict as between processes
+// An app's folder of Metal's build folders (ga_claim / ga_remove): a start with no other copy running snapshots only earlier runs' directories with their (dev, ino)
+// identity; a copy started beside it lists none; once the first exits, a third start still lists none while the second runs; and background removal preserves files,
+// symlinks, unrelated directories, post-snapshot directories, and any entry replaced by a new directory, file, or symlink with the same name.
+static NSSet<NSString *> *ga_names(NSArray<GaDir *> *dirs) {
+    NSMutableSet<NSString *> *s = [NSMutableSet setWithCapacity:dirs.count];
+    for (GaDir *g in dirs) [s addObject:g->name];
+    return s;
+}
 static void app_folder_claim(void) {
     EXPECT("app folder: a host without a bundle shares Metal's folder", 0, ga_own());
     EXPECT("app folder: Metal's folder", 1, [ga_dir() hasSuffix:@"/com.apple.gpuarchiver"]);
-    NSString *dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test/com.apple.gpuarchiver"];
-    for (NSString *n in @[@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb"]) [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:n] withIntermediateDirectories:YES attributes:nil error:nil];
-    [@"x" writeToFile:[dir stringByAppendingPathComponent:@"other"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *app_dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test"];
+    NSString *dir = [app_dir stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    NSString *d_a = [dir stringByAppendingPathComponent:@"gpuarchiver-aaaaaa"];
+    NSString *d_a_nested = [d_a stringByAppendingPathComponent:@"nested"];
+    NSString *d_b = [dir stringByAppendingPathComponent:@"gpuarchiver-bbbbbb"];
+    NSString *d_rep = [dir stringByAppendingPathComponent:@"gpuarchiver-replaced"];
+    NSString *d_sfile = [dir stringByAppendingPathComponent:@"gpuarchiver-swapfile"];
+    NSString *d_slink = [dir stringByAppendingPathComponent:@"gpuarchiver-swaplink"];
+    for (NSString *p in @[d_a_nested, d_b, d_rep, d_sfile, d_slink])
+        [fm createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"old" writeToFile:[d_a_nested stringByAppendingPathComponent:@"state"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_b stringByAppendingPathComponent:@"state"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_rep stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_sfile stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_slink stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *other = [dir stringByAppendingPathComponent:@"unrelated"];
+    NSString *other_file = [other stringByAppendingPathComponent:@"state"];
+    [fm createDirectoryAtPath:other withIntermediateDirectories:NO attributes:nil error:nil];
+    [@"keep" writeToFile:other_file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    EXPECT("app folder: nested symlink fixture created", 0, symlink(other.fileSystemRepresentation, [d_a_nested stringByAppendingPathComponent:@"out"].fileSystemRepresentation));
+
+    NSString *file = [dir stringByAppendingPathComponent:@"gpuarchiver-file"];
+    [@"keep" writeToFile:file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSString *link = [dir stringByAppendingPathComponent:@"gpuarchiver-link"];
+    EXPECT("app folder: matching symlink fixture created", 0, symlink(other.fileSystemRepresentation, link.fileSystemRepresentation));
+
     int a, b, c, d;
-    NSSet<NSString *> *got = ga_claim(dir, &a), *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", nil];
-    EXPECT("app folder: the first copy lists the earlier runs' folders", 1, a >= 0 && [got isEqualToSet:want]);
+    NSArray<GaDir *> *got = ga_claim(dir, &a);
+    NSSet<NSString *> *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", @"gpuarchiver-replaced", @"gpuarchiver-swapfile", @"gpuarchiver-swaplink", nil];
+    EXPECT("app folder: the first copy lists only earlier run directories", 1, a >= 0 && [ga_names(got) isEqualToSet:want]);
+    NSString *late = [dir stringByAppendingPathComponent:@"gpuarchiver-late"], *late_file = [late stringByAppendingPathComponent:@"live"];
+    EXPECT("app folder: post-snapshot directory created", 1, [fm createDirectoryAtPath:late withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("app folder: post-snapshot file written", 1, [@"live" writeToFile:late_file atomically:NO encoding:NSUTF8StringEncoding error:nil]);
     EXPECT("app folder: a second copy lists none", 1, ga_claim(dir, &b) == nil && b >= 0);
     close(a);   // the first copy quits
     EXPECT("app folder: a third copy lists none while the second runs", 1, ga_claim(dir, &c) == nil && c >= 0);
     close(b); close(c);
-    EXPECT("app folder: with no copy running, a start lists them again", 2, ga_claim(dir, &d).count);
+    NSArray<GaDir *> *again = ga_claim(dir, &d);
+    EXPECT("app folder: with no copy running, a start lists old and late directories", 6, again.count);
     close(d);
+
+    // Concurrent-writer mutations after snapshot: keep the old directory's inode allocated across replacement creation so the new directory gets a distinct st_ino.
+    NSString *moved_rep = [app_dir stringByAppendingPathComponent:@"moved-replaced"];
+    NSString *rep_live = [d_rep stringByAppendingPathComponent:@"live"];
+    EXPECT("app folder: move replaced fixture aside", 1, [fm moveItemAtPath:d_rep toPath:moved_rep error:nil]);
+    EXPECT("app folder: create replacement directory", 1, [fm createDirectoryAtPath:d_rep withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("app folder: write file in replacement directory", 1, [@"live" writeToFile:rep_live atomically:NO encoding:NSUTF8StringEncoding error:nil]);
+    EXPECT("app folder: remove moved old fixture", 1, [fm removeItemAtPath:moved_rep error:nil]);
+
+    EXPECT("app folder: remove swapfile fixture dir", 1, [fm removeItemAtPath:d_sfile error:nil]);
+    EXPECT("app folder: replace with regular file", 1, [@"file" writeToFile:d_sfile atomically:NO encoding:NSUTF8StringEncoding error:nil]);
+
+    EXPECT("app folder: remove swaplink fixture dir", 1, [fm removeItemAtPath:d_slink error:nil]);
+    EXPECT("app folder: replace with symlink", 0, symlink(other.fileSystemRepresentation, d_slink.fileSystemRepresentation));
+
+    EXPECT("app folder: removes only unchanged snapshotted directories", 2, ga_remove(dir, got));
+    struct stat st;
+    EXPECT("app folder: old matching directory a gone", 0, lstat(d_a.fileSystemRepresentation, &st) == 0);
+    EXPECT("app folder: old matching directory b gone", 0, lstat(d_b.fileSystemRepresentation, &st) == 0);
+    EXPECT("app folder: unrelated directory retained", 1, [fm fileExistsAtPath:other_file]);
+    EXPECT("app folder: matching regular file retained", 1, lstat(file.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode));
+    EXPECT("app folder: matching symlink retained without following it", 1, lstat(link.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
+    EXPECT("app folder: directory created after snapshot retained", 1, [fm fileExistsAtPath:late_file]);
+    EXPECT("app folder: replacement directory with same name retained", 1, [fm fileExistsAtPath:rep_live]);
+    EXPECT("app folder: directory swapped for regular file retained", 1, lstat(d_sfile.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode));
+    EXPECT("app folder: directory swapped for symlink retained", 1, lstat(d_slink.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
     EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
+    EXPECT("app folder: no folder, nothing removed", 0, ga_remove(nil, got));
 }
 
 // A write's wait for a plain compile still running (ser_begin): in play it gives up after SER_WAIT_MS and its period is dropped; the prebuild tool waits for the compile
@@ -1161,6 +1224,118 @@ static void bundle_recovery_compute(void) {
     [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
 }
 
+@interface BatchProbeSerializer : NSObject {
+@public
+    id<MTL4PipelineDataSetSerializer> ser;
+    _Atomic int *active, *peak, *calls, *bad_gate;
+} @end
+@implementation BatchProbeSerializer
+- (id)forwardingTargetForSelector:(SEL)selector { return ser; }
+- (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
+    atomic_fetch_add(calls, 1);
+    pthread_mutex_lock(&g_ser_mu);
+    int bad = g_ser_compiles != 0 || g_ser_want < 1;
+    pthread_mutex_unlock(&g_ser_mu);
+    if (bad) atomic_fetch_add(bad_gate, 1);
+    int cur = atomic_fetch_add(active, 1) + 1;
+    int prev = atomic_load(peak);
+    while (cur > prev && !atomic_compare_exchange_weak(peak, &prev, cur)) {}
+    usleep(40000);
+    BOOL ok = [ser serializeAsArchiveAndFlushToURL:url error:error];
+    atomic_fetch_sub(active, 1);
+    return ok;
+}
+@end
+
+static void batch_wave(void) {
+    char bdir[] = "/tmp/t_pso_wave.XXXXXX"; if (!mkdtemp(bdir)) abort();
+    arch_flush_wait();
+    NSString *saved_dir = g_arch_dir;
+    int saved_max = g_arch_period_max, saved_batch = g_arch_ser_batch;
+    g_arch_dir = @(bdir); g_arch_period_max = 2; g_arch_ser_batch = 3;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    _Atomic int ser_active = 0, ser_peak = 0, ser_calls = 0, bad_gate = 0;
+    NSMutableArray<MTLRenderPipelineDescriptor *> *built = [NSMutableArray array];
+    NSError *err = nil;
+    arch_batch_begin();
+    for (int i = 0; i < 6; i++) {
+        // Wrap each new period's serializer before it rolls over to observe concurrent wave serialization and ser_begin exclusion.
+        if (i % 2 == 0 && ![(id)g_ep->ser isKindOfClass:BatchProbeSerializer.class]) {
+            BatchProbeSerializer *p = [BatchProbeSerializer new];
+            p->ser = g_ep->ser; p->active = &ser_active; p->peak = &ser_peak; p->calls = &ser_calls; p->bad_gate = &bad_gate;
+            g_ep->ser = (id<MTL4PipelineDataSetSerializer>)p;
+        }
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 300);
+        EXPECT("wave: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+        [built addObject:cd];
+        if (i == 3) {
+            __block NSUInteger queued = 0; __block int comps_live = 0;
+            dispatch_sync(g_arch_q, ^{
+                queued = g_arch_batch.count;
+                for (ArchEpoch *e in g_arch_batch) if (e->comp != nil) comps_live++;
+            });
+            EXPECT("wave: two full periods parked before reaching batch limit 3", 2, queued);
+            EXPECT("wave: parked periods released their compilers", 0, comps_live);
+            EXPECT("wave: no files written before wave fills", 0, archive_files(@(bdir)).count);
+        }
+    }
+    dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+    EXPECT("wave: third full period flushed all 3 files", 3, archive_files(@(bdir)).count);
+    EXPECT("wave: serializer invoked for all 3 periods", 3, atomic_load(&ser_calls));
+    EXPECT("wave: serializers ran concurrently inside one wave", 1, atomic_load(&ser_peak) >= 2);
+    EXPECT("wave: ser_begin held with zero compiles active", 0, atomic_load(&bad_gate));
+    EXPECT("wave: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    // Partial wave (1 full parked period + 1 partial period in g_ep) drains cleanly on arch_batch_end + arch_flush_wait.
+    for (int i = 6; i < 9; i++) {
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 300);
+        EXPECT("wave tail: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+        [built addObject:cd];
+    }
+    arch_batch_end();
+    arch_flush_wait();
+    NSArray<NSString *> *names = [archive_files(@(bdir)) sortedArrayUsingSelector:@selector(compare:)];
+    EXPECT("wave tail: all 5 period files written", 5, names.count);
+    EXPECT("wave tail: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    // Every base from the parallel wave is usable through Metal's archive open.
+    NSMutableArray<id<MTL4Archive>> *opened = [NSMutableArray array];
+    for (NSString *n in names) {
+        id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(bdir) stringByAppendingPathComponent:n]] error:&err];
+        if (a) [opened addObject:a];
+    }
+    EXPECT("wave verify: all 5 archives opened", 5, opened.count);
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = opened;
+    int found = 0;
+    for (MTLRenderPipelineDescriptor *cd in built) if (pso_build_ex(cd, 0, &err, 0) != nil) found++;
+    EXPECT("wave verify: all 9 bases found in archives with compile=0", 9, found);
+
+    // Compiler death discards any already-parked period in the batch instead of publishing it.
+    char ddir[] = "/tmp/t_pso_wdeath.XXXXXX"; if (!mkdtemp(ddir)) abort();
+    g_arch_dir = @(ddir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[];
+    uint64_t disc0 = atomic_load(&g_arch_discarded);
+    arch_batch_begin();
+    for (int i = 0; i < 2; i++) {
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 340);
+        EXPECT("wave death: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+    }
+    arch_died([NSError errorWithDomain:@"AGX" code:2 userInfo:@{NSLocalizedDescriptionKey: @"XPC_ERROR_CONNECTION_INTERRUPTED"}]);
+    arch_batch_end();
+    arch_flush_wait();
+    EXPECT("wave death: parked period discarded, no archive written", 0, archive_files(@(ddir)).count);
+    EXPECT("wave death: discard counted", 1, atomic_load(&g_arch_discarded) > disc0);
+    EXPECT("wave death: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    g_arch_dir = saved_dir; g_arch_period_max = saved_max; g_arch_ser_batch = saved_batch;
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(ddir) error:nil];
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -1168,6 +1343,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!cache_path) abort();
     if (![NSFileManager.defaultManager createDirectoryAtPath:cache_path
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
+    if (argc == 2 && !strcmp(argv[1], "--cache-only")) {
+        app_folder_claim();
+        printf("t_pso_archive cache cleanup: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     int bundle_open = argc == 5 && !strcmp(argv[1], "--bundle-open");
     setenv("DM_PSO_ARCHIVE", bundle_open ? "off" : argc == 3 ? argv[2] : dir, 1);
@@ -1210,6 +1390,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         pso4_init(); crashed_flush_race(0); crashed_flush_race(1); compiler_death_notifications();
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive compiler death: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--batch-wave")) {
+        pso4_init(); batch_wave();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive batch wave: %d checks, %d failed\n", checks, failed); return failed != 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--active-flush")) {
         pso4_init();
@@ -1785,6 +1970,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     crashed_flush_race(1);
     compiler_death_notifications();
     tool_write_waits_for_compiles();
+    batch_wave();
     // key normalization
     pso_key k; memset(&k, 0, sizeof k); k.blend_en = 0x5; k.dfmt = MTLPixelFormatDepth32Float; k.sfmt = MTLPixelFormatStencil8;
     for (int i = 0; i < 8; i++) { k.cfmt[i] = MTLPixelFormatRGBA8Unorm; k.blend[i].src_rgb = 5; k.blend[i].dst_rgb = 6; }   // every target present: only the blend rule acts

@@ -30,6 +30,7 @@
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
 #   · CRA (Camelot, Mario Tennis Fever): BNSH in the FSHA, VFXB and SARC members of the NARC containers in rom:/42, its files scrambled and listed only in the NRO the game decodes at run time, see cra.py and cra_jobs
+#   · HSPK (Sega Fenrir, Valkyria Chronicles 4): gzip-compressed BNSH in NSGZ records of the HSG shader package and main, see nsgz_shaders
 #   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
 #       NieR:Automata's DAT members instead prefix length-delimited NVN code and control sections with a binding table (pg_sized_shader)
 #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
@@ -71,6 +72,7 @@
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 names the source chosen for the key); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> (geo_pairs.tsv and mesh_pairs.tsv are written beside it) [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated> [<play capture file list, JSON>]]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
+#   Prefix the arguments with --json-paths to pass the RomFS, main and DLC path lists as JSON arrays, including paths that contain commas.
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
@@ -1677,8 +1679,12 @@ def cra_shaders(path, rel, ents, out):
     import cra
     with open(path, 'rb') as f:
         for e in ents:
-            if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
-            scan_blob(cra.undo(cra.read(f, e)), f'/{rel}/{e[1]}', out)
+            where = f'/{rel}/{e[1]}'
+            try:
+                if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
+                d = cra.undo(cra.read(f, e))
+            except cra.Error as x: red(f'{where}: {x}')
+            scan_blob(d, where, out)
 
 PDAT, PDAT_PMAP = b'PDAT', b'PMAP'
 PDAT_ZSTD, PDAT_CTL, PDAT_SPAN = b'\x28\xb5\x2f\xfd', CTL_MAGIC + b'\xc9\0\0\0', 1 << 20   # a PMAP frame never takes up 1 MB (the largest of Kirby Air Riders' 27,299: 186 KB inflated); pdat_shaders stops if one does
@@ -4153,12 +4159,32 @@ def ungzip(d, label):
     return out
 
 
+YAZ0_RUNS = tuple((len(r[0]), tuple(map(len, r[1:]))) for r in (format(h, '08b').split('0') for h in range(256)))   # a group header's literal runs: before its first back-reference, and after each one
+YAZ0_REF = tuple((b >> 4 and (b >> 4) + 2, ((b & 15) << 8) + 1) for b in range(256))   # a back-reference's first byte: its length (0: one more byte + 0x12) and its distance less the second byte
+
+
 def yaz0(s, label='Yaz0'):
-    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0). Pure Python runs at about 20–45 MB/s per core, under a minute for the whole 4.7 GB RomFS in parallel, and needs no extra dependency.
-    Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period"""
-    n = int.from_bytes(s[4:8], 'big'); out = bytearray(); si = 16
+    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0; Breath of the Wild's base RomFS: 31,304 Yaz0 files, 15.7 GB decoded). Pure Python, needs no extra dependency.
+    Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period.
+    Whole groups go in batches: past the first 0x1000 bytes (no distance reaches before the start), g groups that can neither read past the stream (a group reads at most 1 + 8 * 3 bytes) nor pass n
+    (it writes at most 8 * 0x111), each literal run one slice (YAZ0_RUNS). The rest, the start, the end and a damaged stream, goes item by item, with the same output and errors.
+    About 70 MB/s per core on Breath of the Wild's files, twice the item-by-item loop (M5 Pro, Python 3.13; 79% of their items are literals, 31% of their headers 0xff)"""
+    n = int.from_bytes(s[4:8], 'big'); out = bytearray(); si = 16; slen = len(s)
     try:
         while len(out) < n:
+            o = len(out)
+            if o >= 0x1000 and (g := min((slen - si) // 25, (n - o) // 0x888)) > 0:
+                for _ in range(g):
+                    k, rest = YAZ0_RUNS[s[si]]; si += 1
+                    if k: out += s[si:si + k]; si += k; o += k
+                    for k in rest:
+                        ln, dist = YAZ0_REF[s[si]]; dist += s[si + 1]
+                        if ln: si += 2
+                        else: ln = s[si + 2] + 0x12; si += 3
+                        st = o - dist; o += ln
+                        out += out[st:st + ln] if dist >= ln else (out[st:] * (ln // dist + 1))[:ln]
+                        if k: out += s[si:si + k]; si += k; o += k
+                continue
             h = s[si]; si += 1
             for _ in range(8):
                 if h & 0x80:
@@ -4230,6 +4256,44 @@ def unzs(path):
     did = zs_dict_id(d)
     if not did: return zstd_mod().decompress(d)
     return unzs_dict(d, did, path)
+
+def nested_zstd(d, label, limit):
+    """Decode one or more concatenated zstd frames within a byte budget."""
+    zstd = zstd_mod(); parts = []; rem = limit; view = d
+    while view:
+        if view[:4] != ZSTD_MAGIC: red(f'{label}: incomplete or trailing data in a nested zstd frame')
+        did = zs_dict_id(view)
+        if did:
+            if did not in ZDICTS: red(f'{label}: a frame needs zstd dictionary {did}, which Pack/ZsDic.pack.zs does not have')
+            if did not in _ZD:
+                try: _ZD[did] = zstd.ZstdDict(ZDICTS[did])
+                except (zstd.ZstdError, ValueError) as e: red(f'{label}: invalid zstd dictionary {did} ({e})')
+        declared = frame_size(view)
+        if declared is not None and declared > rem: red(f'{label}: zstd archive members expand to more than {NEST} times the file')
+        dec = zstd.ZstdDecompressor(zstd_dict=_ZD[did]) if did else zstd.ZstdDecompressor()
+        try: chunk = dec.decompress(view, max_length=rem + 1)
+        except zstd.ZstdError as e: red(f'{label}: invalid nested zstd frame ({e})')
+        if len(chunk) > rem or not dec.eof and not dec.needs_input:
+            red(f'{label}: zstd archive members expand to more than {NEST} times the file')
+        if not dec.eof: red(f'{label}: incomplete or trailing data in a nested zstd frame')
+        parts.append(chunk); rem -= len(chunk); view = dec.unused_data
+    return parts[0] if len(parts) == 1 else b''.join(parts)
+
+EMZ = b'#EMZ'
+
+
+def emz_decode(d, label, limit):
+    """Decode the raw Deflate stream in an EMZ wrapper, within the archive budget."""
+    size, start = field(d, '<II', 8, f'{label} EMZ header')
+    if not 16 <= start < len(d): red(f'{label}: invalid EMZ stream offset {start:#x}')
+    if size > limit: red(f'{label}: EMZ expands beyond the archive byte budget')
+    stream = zlib.decompressobj(-zlib.MAX_WBITS)
+    try: decoded = stream.decompress(d[start:], size + 1)
+    except zlib.error as e: red(f'{label}: invalid EMZ Deflate stream ({e})')
+    if len(decoded) != size or not stream.eof or stream.unused_data:
+        red(f'{label}: EMZ stream does not end at its declared size ({size} bytes)')
+    return decoded
+
 
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""
@@ -4392,10 +4456,47 @@ def unity_text_glslc(x, base):
     return out
 
 NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): real files nest a few. A damaged or crafted one could nest one per header's length, or have every
-            # member point at the same inner archive, its work doubling with each level. Two budgets of NEST times the file bound the work: left[0], the members a file's archives open,
-            # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
-            # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
-            # that expands 9 times, which then added up to 18 times the file)
+            # member point at the same inner archive, its work doubling with each level. Two budgets start at NEST times the file: left[0], the members a file's archives open,
+            # each counted by what it takes up in its archive, and left[1], what compressed members expand to (shared across the whole file). A decoded compressed member gives
+            # only its own subtree a traversal budget for its remaining levels without crediting siblings or growing left[1]. Counting a Yaz0 member by what it expands to in the
+            # first budget paid twice for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds
+            # one layout archive that expands 9 times, which then added up to 18 times the file)
+NSGZ = b'NSGZ    '
+NSGZ_MAX = 16 << 20   # top-level expansion floor (matches fuzzlib.allowed); sparse BNSH controls compress 30x+, past NEST * len(d)
+
+def nsgz_shaders(d, label, budget=None):
+    """Fenrir's HSPK packages and main embed NSGZ records: eight magic bytes, a u64 compressed length, then one gzip stream holding a BNSH.
+    Inside an HSPK container every magic is a record and malformed headers fail loudly; in other blobs (such as main) a magic whose length does not fit or whose payload does
+    not open with a gzip header is a literal string and is skipped, while matching gzip records are validated strictly. When nested inside an archive, budget is scan_blob's
+    shared expansion budget left[1]; at top level, allow up to max(NSGZ_MAX, 256 * len(d)) decoded bytes."""
+    strict = d[:4] == b'HSPK'
+    out, pos = [], 0
+    limit = max(NSGZ_MAX, 256 * len(d)) if budget is None else budget[0]
+    while (pos := d.find(NSGZ, pos)) >= 0:
+        where = f'{label}#NSGZ@{pos:#x}'
+        if pos + 16 > len(d):
+            if strict: field(d, '<Q', pos + 8, where)
+            break
+        size = struct.unpack_from('<Q', d, pos + 8)[0]
+        start, end = pos + 16, pos + 16 + size
+        if end > len(d):
+            if strict: red(f'{where}: compressed data runs past the package')
+            pos += len(NSGZ); continue
+        if not strict and (size < 20 or d[start:start + 3] != b'\x1f\x8b\x08'):
+            pos += len(NSGZ); continue
+        stream = zlib.decompressobj(31)
+        try: member = stream.decompress(d[start:end], limit + 1)
+        except zlib.error as e: red(f'{where}: invalid gzip stream ({e})')
+        limit -= len(member)
+        if budget is not None: budget[0] = limit
+        if limit < 0: red(f'{where}: decoded shaders exceed the expansion budget')
+        if not stream.eof or stream.unused_data: red(f'{where}: gzip stream does not match its record length')
+        if member[:8] != b'BNSH\0\0\0\0': red(f'{where}: decoded record is not BNSH')
+        if field(member, '<I', 0x1c, where)[0] != len(member): red(f'{where}: BNSH length does not match the decoded record')
+        out.extend(bnsh_shaders(member, 0, where))
+        pos = end
+    return out
+
 VFS2 = b'VFS2'
 VFS2_MAX = 16 << 20   # single GLSLC output upper bound; keeps corrupt/fuzz length prefixes within fuzzlib's allocation cap
 _VFS2_INV = bytes(range(255, -1, -1))
@@ -4497,7 +4598,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:8] == CIVBSF: out.extend(civbsf_shaders(d, label)); return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))
-        if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
+        if left is None: n = NEST * sum(len(member) for _, member in members); left = ([n], [n])   # as with Yaz0, count decoded bytes, not compressed bytes
         for nm, member in members: scan_blob(member, label + nm, out, depth + 1, left)
         return
     if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'DMPA') or d[:8] == b'cmp\0zlib':
@@ -4505,20 +4606,31 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:8] == PACX4:   # LZ4 chunks: as with Yaz0, the budget counts decoded bytes
         parts = pacx4_parts(d, label)
-        if left is None: left = [NEST * max(len(d), sum(len(p) for _, p in parts))] * 2
+        if left is None: n = NEST * max(len(d), sum(len(p) for _, p in parts)); left = ([n], [n])
         for nm, p in parts: scan_blob(p, f'{label}/{nm}', out, depth + 1, left)
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
     stored = len(d)   # what the member takes up in its archive
+    compressed = d[:4] in (b'Yaz0', ZSTD_MAGIC, EMZ)
     if d[:4] == b'Yaz0':
         if left is not None:   # charged by its header before it is decoded
-            left[1] -= int.from_bytes(d[4:8], 'big')
-            if left[1] < 0: red(f'{label}: the Yaz0 archive members expand to more than {NEST} times the file')
+            left[1][0] -= int.from_bytes(d[4:8], 'big')
+            if left[1][0] < 0: red(f'{label}: the Yaz0 archive members expand to more than {NEST} times the file')
         d = yaz0(d, label)
-    if left is None: left = [NEST * len(d)] * 2   # the file itself: what its archives' members may add up to, and what their Yaz0 may expand to
+    elif d[:4] == ZSTD_MAGIC:
+        d = nested_zstd(d, label, left[1][0] if left is not None else max(16 << 20, 256 * stored))
+        if left is not None: left[1][0] -= len(d)
+    elif d[:4] == EMZ:
+        d = emz_decode(d, label, left[1][0] if left is not None else max(16 << 20, 256 * stored))
+        if left is not None: left[1][0] -= len(d)
+    if left is None: n = NEST * len(d); left = ([n], [n])   # the file itself: traversal bytes and compressed-member expansion
     else:
-        left[0] -= stored
-        if left[0] < 0: red(f'{label}: the archive members add up to more than {NEST} times the file (members that overlap)')
+        left[0][0] -= stored
+        if left[0][0] < 0: red(f'{label}: the archive members add up to more than {NEST} times the file (members that overlap)')
+        # Children of a decoded archive traverse its decoded storage on their own
+        # remaining-level budget; siblings do not receive this credit, and all
+        # decompression across the file still spends the shared left[1] budget.
+        if compressed: left = ([(NEST - depth) * len(d)], left[1])
     if d[:4] == b'SARC':
         for nm, m in sarc_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
@@ -4556,6 +4668,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
         return
+    if NSGZ in d: out.extend(nsgz_shaders(d, label, left[1] if depth else None))
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
@@ -5177,7 +5290,7 @@ def scan_file_in(args):
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
-    if d[:4] == b'SHN!' or d[:8] == CIVBSF:
+    if d[:4] in (b'SHN!', EMZ) or d[:8] == CIVBSF:
         scan_blob(d, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
@@ -5206,7 +5319,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'cover') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and (b'Yaz0' in d or ZSTD_MAGIC in d)) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE and NSGZ not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 or zstd members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -5221,7 +5334,7 @@ def nxcx_shaders(f, label):
     Seek to GLSLC candidates through a mapping so random magic in compressed textures needs no full-file copy.
     """
     from romfs import mmap
-    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', MGFX + b'\x0a', NEEDLE, SUMO_NX, NVNSH)
+    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', MGFX + b'\x0a', NEEDLE, SUMO_NX, NVNSH, NSGZ)
     overlap = max(map(len, other)) - 1
     offsets, tail, at = [], b'', 0
     loose = False
@@ -5348,13 +5461,22 @@ def plan_jobs(files, heads, romfs_v, main_v):
 
 
 def main():
-    romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
-    pairsout = sys.argv[6] if len(sys.argv) > 6 else None
-    psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
-    dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
-    # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
+    args = sys.argv[1:]
+    json_paths = args[:1] == ['--json-paths']
+    if json_paths:
+        args = args[1:]
+    romfs_l, main_l, pkg, mapout, factsout = args[:5]
+    pairsout = args[5] if len(args) > 5 else None
+    psopairsout = args[6] if len(args) > 6 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
+    dlc_l = args[7] if len(args) > 7 else ''
+    if json_paths:
+        romfs_v, main_v = json.loads(romfs_l), json.loads(main_l)
+        dlc_v = json.loads(dlc_l) if dlc_l else []
+    else:
+        romfs_v, main_v = romfs_l.split(','), main_l.split(',')
+        dlc_v = dlc_l.split(',') if dlc_l else []
+    # The RomFS and main lists pair one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
-    romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
     registered = read_registered_sources(os.environ.get('DM_SPLIT_REGISTERED_MAP', ''))
     files, results, common = [], [], None
@@ -5422,8 +5544,8 @@ def main():
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     play_pairs = set()
-    if len(sys.argv) > 9:
-        played, play_pairs = glslc_play(sys.argv[9])
+    if len(args) > 8:
+        played, play_pairs = glslc_play(args[8])
         results.append(('glslc_play', played, set(), {}))   # game files, boot captures and DLC retain ownership of any keys they share with play captures
     keys, pairs, per_src = merge_keys(results, registered)
     pairs.update(pair for pair in play_pairs if any(k in keys and keys[k][0].startswith('/glslc_play/') for k in pair[:3]))
