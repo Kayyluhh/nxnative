@@ -2446,9 +2446,9 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         rt_acquire(rt_period_ns(o, period));
     }
     // Snapshot this slot's earliest display-release time and take ownership of its previous present receipt now, before a concurrent present thread can enqueue a new present for *idx
-    uint64_t at = 0, tk = 0, pf = 0;
+    uint64_t at = 0, tk = 0;
     pthread_mutex_lock(&acq_mu);
-    if (*idx >= 0 && *idx < 4) { at = o->avail[*idx]; tk = o->ticket[*idx]; o->ticket[*idx] = 0; pf = o->pfence[*idx]; }
+    if (*idx >= 0 && *idx < 4) { at = o->avail[*idx]; tk = o->ticket[*idx]; o->ticket[*idx] = 0; }
     pthread_mutex_unlock(&acq_mu);
 
     if (!s) {
@@ -2463,11 +2463,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     aw->win = o;
     aw->avail = at;
     aw->ticket = tk;
-    // The acquire sync: NVN signals it when the image is released by the display, not when all the work submitted so far is done. The host used the latest fence, which made
-    // the game's wait on it (Donkey Kong Bananza waits every frame, main+0x204298) a wait for the frame it had just submitted: CPU and GPU took turns, 9 ms of a 17 ms frame in the
-    // wait. Now it is the fence of this image's own last present (the work that drew it and its present copy); the ticket wait in acq_wait_run has the present taken. DM_NVN_ACQ_FENCE=last: the old one
-    static int acq_last = -1; if (acq_last < 0) { const char *e = getenv("DM_NVN_ACQ_FENCE"); acq_last = e && !strcmp(e, "last"); if (acq_last) LOG("[nvn] acquire sync: the latest fence (DM_NVN_ACQ_FENCE=last)"); }
-    aw->gpu_fence = !acq_last && pf ? pf : mtl_last_fence();
+    aw->gpu_fence = mtl_last_fence();
     aw->refs = 2;   // 1 for win->pending_acq, 1 for sync_t
     pthread_mutex_lock(&acq_mu);
     o->pending_acq = aw;
@@ -3352,7 +3348,6 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         pthread_mutex_lock(&acq_mu);
         uint64_t old_tk = o->ticket[idx];
         o->ticket[idx] = new_tk;
-        o->pfence[idx] = mtl_last_fence();   // the image is free again once the work up to its present has completed (the acquire's fence, nvnWindowAcquireTexture)
         pthread_mutex_unlock(&acq_mu);
         if (old_tk) nvn_queue_present_release(old_tk);
     }

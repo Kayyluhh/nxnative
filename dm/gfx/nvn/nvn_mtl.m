@@ -1113,7 +1113,6 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
-static void gpu_keep_start(void);
 static void mtl_init_once(void) {
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
@@ -1203,7 +1202,6 @@ static void mtl_init_once(void) {
     if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
     MLOG("Metal device %s", g_dev.name.UTF8String);
     udc_selftest();
-    gpu_keep_start();
 }
 
 void mtl_init(void) {
@@ -1234,9 +1232,6 @@ static NSHashTable *g_dead_pools;
 // Every buffer binding of every draw used to take g_mu, which game threads creating pools and the GPU completion handler also take, and search the pool index. Two levels: a table direct-mapped
 // by 4 KB page, then the last 8 pools found, which also fill the table. Breath of the Wild binds from more pools a frame than 8 entries alone could hold (about 2300 of its 21000 lookups a frame
 // took the lock), and its uniform rings move to a new page every few draws (the table alone missed as often)
-// The table is allocated for a thread on its first lookup, so only the threads that look addresses up pay for it. Before the table, the pool of the last hit: consecutive lookups mostly
-// land in the same pool (a draw loop's uniform blocks in one ring), and Donkey Kong Bananza's later layers make about 60,000 lookups a frame, which a table larger than the core's caches
-// made slower, not faster (32,768 slots, 1.8 MB: a cache miss a lookup)
 enum { PC_BITS = 10, PC_RECENT = 8 };
 static _Atomic uint64_t g_pool_gen = 1;
 typedef struct { uintptr_t lo, hi, base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; uintptr_t end; int reach; } pc_ent;
@@ -7977,7 +7972,6 @@ static void shmap_read(void) {
     uint8_t tex_n, tex_idx[NVN_REFL_MAXB]; int lists_nb;   // rf.b's bindings that name a texture or an image, in order (sh_tex_list; lists_nb: the rf.nb it was made for + 1, 0 = not made)
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time, borrowed from its arena: valid only while ab_pass is the current pass. Keeping it here strongly would pin retired arenas for shaders no longer drawn.
-    int8_t uc_st; int uc_npend; uint32_t uc_sbw, uc_pgen; uint64_t uc_ver; p_bind_buf uc_ubo[16], uc_ssbo[16];   // ubd_conflict_sh's last answer of no conflict: the state it held for (uc_st -1: none)
     uint8_t ab_cbuf_only;   // 0 not decided, 1: its only bindings read through a uniform buffer are plain CBUF slots (args_cbuf_only), so a block can be patched when only those changed; 2 not
     __unsafe_unretained id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen, ab_gen, ab_ugen;   // ab_gen / ab_ugen: the stage's binding generations it was written at (g_args_gen); ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
@@ -18115,14 +18109,10 @@ static int ubd_conflict_textures(NvShader *sh, int st) {
     os_unfair_lock_unlock(&g_rmu);
     return hit;
 }
-static int ubd_conflict_scan(NvShader *sh, int st, uint32_t only) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages); only: the uniform slots to look at (~0 all)
+static int ubd_conflict_sh(NvShader *sh, int st) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages)
+    if (ubd_conflict_textures(sh, st)) return 1;
     const uint8_t *bufs; int nbufs = sh_buf_list(sh, &bufs);   // the other kinds (samplers, textures by slot, the host's own blocks) are nothing to this walk
     for (int bi = 0; bi < nbufs; bi++) { const nvn_rbind *b = &sh->rf.b[bufs[bi]];
-        if (only != ~0u) {   // a partial look: the bindings that read a uniform slot in only
-            if (b->kind == NVN_RB_CBUF || b->kind == NVN_RB_UBOP) { if (b->reg >= 16 || !(only >> b->reg & 1)) continue; }
-            else if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_IMGU || b->kind == NVN_RB_TBUFU) {
-                if (!((b->reg < 16 && only >> b->reg & 1) || (b->soff && b->sreg < 16 && only >> b->sreg & 1))) continue; }
-            else continue; }
         if (b->kind == NVN_RB_GMEM) { if (ubd_hits(0, UINT64_MAX)) return 1; continue; }   // reads any pool
         if (b->reg >= 16) continue;
         const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];
@@ -18137,25 +18127,8 @@ static int ubd_conflict_scan(NvShader *sh, int st, uint32_t only) {   // one sta
         else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; } }
     return 0;
 }
-// The answer depends on the stage's uniform and storage bindings, the deferred updates (g_ubd_ver) and what the shadows from memory may read (the writes queued and noted in this
-// submission). A draw loop that rebinds one uniform block per draw asked about every binding of the shader each time (Donkey Kong Bananza: 47 fragment bindings, 12,000 draws a pass);
-// with the rest as it was at the last answer of no conflict, only the bindings of the uniform slots that changed are looked at again
-static int ubd_conflict_sh(NvShader *sh, int st) {
-    if (ubd_conflict_textures(sh, st)) { sh->uc_st = -1; return 1; }   // bound buffer textures: not part of the cached state below, so looked at every time
-    uint32_t only = ~0u;
-    if (sh->uc_st == st && sh->uc_ver == g_ubd_ver && sh->uc_sbw == g_sbw_gen && sh->uc_pgen == g_pend_gen && sh->uc_npend == g_npend && !ubp_check_on() && !memcmp(sh->uc_ssbo, S.ssbo[st], sizeof sh->uc_ssbo)) {
-        only = 0; for (int r = 0; r < 16; r++) if (memcmp(&sh->uc_ubo[r], &S.ubo[st][r], sizeof sh->uc_ubo[r])) only |= 1u << r;
-        if (!only) return 0; }
-    if (ubd_conflict_scan(sh, st, only)) { sh->uc_st = -1; return 1; }
-    if (only == ~0u) { sh->uc_st = (int8_t)st; sh->uc_ver = g_ubd_ver; sh->uc_sbw = g_sbw_gen; sh->uc_pgen = g_pend_gen; sh->uc_npend = g_npend; memcpy(sh->uc_ssbo, S.ssbo[st], sizeof sh->uc_ssbo); }
-    memcpy(sh->uc_ubo, S.ubo[st], sizeof sh->uc_ubo);
-    return 0;
-}
 static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
-    static uint64_t vb_ver; static typeof(S.vbuf[0]) vb_last[16];   // the vertex streams found clear of the deferred updates as they were (g_ubd_ver)
-    if (vb_ver != g_ubd_ver || memcmp(vb_last, S.vbuf, sizeof vb_last)) {
-        for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) { vb_ver = 0; return 1; }
-        vb_ver = g_ubd_ver; memcpy(vb_last, S.vbuf, sizeof vb_last); }
+    for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) return 1;
     if (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + (uint64_t)di->count * 4)) return 1;
     uint64_t ind = dw ? dw->ind : di ? di->ind : 0; if (ind && ubd_hits(ind, ind + 32)) return 1;
     for (int st = 0; pr && st < 2; st++) if (pr->sh[st] && ubd_conflict_sh(pr->sh[st], st)) return 1;
@@ -20871,59 +20844,6 @@ static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
-// ---------- GPU clock keeper (Mac) ----------
-// macOS sets the GPU's clock from how busy it was: a game that waits for the vsync between frames leaves the GPU idle part of each frame, the clock drops, and the same frame then takes
-// longer on the GPU. Donkey Kong Bananza's later layers on an M4 MacBook Air (10 GPU cores): about 23 ms of GPU a frame at 30 fps, 11.4 ms with the GPU kept busy; a test program measured
-// the same pass 23 ms when paced at 30 frames a second and 12.6 ms back to back. The game's frame-rate controller, which compares its frame with 1.2 vsyncs, therefore stayed at 30 fps for
-// good: at 30 fps the GPU idles, so its frames stay slow. A thread keeps one threadgroup of 32 threads spinning on its own queue for part of the time (its duty), so the GPU looks busier
-// and its clock rises, as far as the frames need: every half second the duty goes up while a frame's GPU time (mtl_gpu_ms, 8 frames back) is above KEEP_HI_MS and down while it is below
-// KEEP_LO_MS. Kept at full duty, the clock stays at its top and the fanless Air heated until its CPU slowed (its power fell from 6 to 3 W after 10 minutes): the duty takes only the clock
-// the frames need, and none while they fit. Each spin is about 2 ms at the top clock (a commit every few ms, not every half millisecond: the submissions alone took a quarter of a core). No present for a quarter
-// second (a pause, a hidden window) stops it. DM_GPU_KEEP=0 turns it off, 1 holds full duty (default auto)
-enum { KEEP_SPIN = 140000 };
-// 14 / 11.5 ms: in handheld mode the game's 13.4 ms of GPU at the clock macOS picks fits its frame, and holding the clock higher only heated the fanless Air into slowing its CPU
-// (58 fps after 10 minutes, against 60 for 10 minutes with the keeper off); at 30 fps the frames take 20 ms and more, and the keeper lifts them back. DM_GPU_KEEP_MS=<hi>,<lo> overrides
-static double KEEP_HI_MS = 14.0, KEEP_LO_MS = 11.5;
-static _Atomic int g_keep_active;
-static void *gpu_keep_main(void *arg) {
-    int mode = (int)(intptr_t)arg; pthread_setname_np("dm-gpu-keep");
-    { const char *e = getenv("DM_GPU_KEEP_MS"); double hi, lo; if (e && sscanf(e, "%lf,%lf", &hi, &lo) == 2 && hi > lo && lo >= 0) { KEEP_HI_MS = hi; KEEP_LO_MS = lo; } }
-    NSError *e = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void dm_keep(device float *o [[buffer(0)]], constant uint &n [[buffer(1)]], uint t [[thread_position_in_grid]]) { float x = t; for (uint i = 0; i < n; i++) x = fma(x, 1.0000001f, 0.5f); if (x == 12345.f) o[t] = x; }\n" options:nil error:&e];
-    id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"dm_keep"] : nil;
-    id<MTLComputePipelineState> ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
-    id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLBuffer> o = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModePrivate];
-    if (!ps || !q || !o) { MLOG("[RED] GPU clock keeper: cannot make its kernel (%s); off", e ? e.localizedDescription.UTF8String : "no error"); return NULL; }
-    uint32_t n = KEEP_SPIN; uint64_t last_present = 0, last_change = 0, last_adj = 0, lines = 0; double duty = mode == 1 ? 1 : 0;
-    for (;;) { @autoreleasepool {
-        uint64_t now = now_ns(), pn = g_present_n;
-        if (pn != last_present) { last_present = pn; last_change = now; }
-        int presenting = now - last_change < 250000000ull;
-        if (mode == 2 && now - last_adj > 500000000ull) {   // the frames' GPU time over the last half second, 8 frames back as the timing line takes it
-            last_adj = now; uint64_t f = atomic_load(&g_cur_frame); double sum = 0; int k = 0;
-            for (uint64_t d = 8; d < 38 && f > d; d++) { double g = mtl_gpu_ms(f - d); if (g >= 0) { sum += g; k++; } }
-            if (k >= 4) { double g = sum / k, was = duty;
-                if (g > KEEP_HI_MS) duty = duty < 0.1 ? 0.25 : MIN(1.0, duty + 0.15); else if (g < KEEP_LO_MS) duty = MAX(0.0, duty - 0.1);
-                if ((duty > 0) != (was > 0) && lines++ < 40) MLOG("GPU clock keeper: %s (a frame's GPU time %.1f ms)", duty > 0 ? "on" : "off", g); } }
-        if (duty <= 0 || !presenting) { atomic_store(&g_keep_active, 0); usleep(20000); continue; }
-        atomic_store(&g_keep_active, 1);
-        id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-        [ce setComputePipelineState:ps]; [ce setBuffer:o offset:0 atIndex:0]; [ce setBytes:&n length:4 atIndex:1];
-        [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding];
-        uint64_t t0 = now_ns(); [cb commit]; [cb waitUntilCompleted];
-        if (duty < 1) { double spun = (double)(now_ns() - t0) / 1e3; useconds_t rest = (useconds_t)MIN(50000.0, spun * (1 - duty) / duty); if (rest) usleep(rest); }
-    } }
-    return NULL;
-}
-static void gpu_keep_start(void) {
-#if TARGET_OS_OSX
-    const char *e = getenv("DM_GPU_KEEP"); int mode = e ? atoi(e) : 2; if (e && !strcmp(e, "auto")) mode = 2;
-    if (mode <= 0) { MLOG("GPU clock keeper: off (DM_GPU_KEEP=0)"); return; }
-    pthread_t th; if (pthread_create(&th, NULL, gpu_keep_main, (void *)(intptr_t)mode)) { MLOG("[RED] GPU clock keeper: cannot start its thread"); return; }
-    pthread_detach(th);
-    MLOG("GPU clock keeper: %s (DM_GPU_KEEP)", mode == 1 ? "full duty" : "duty set by the frames' GPU time");
-#endif
-}
 void mtl_res_snapshot(mtl_res_count *out) {
     memset(out, 0, sizeof *out);
     out->pso = g_pso.n;
