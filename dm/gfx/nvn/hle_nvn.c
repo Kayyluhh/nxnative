@@ -3228,17 +3228,6 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.no_payback = fps_high();   // at 120 fps the game steps by its target, not by the step: a late frame is slow motion, so three raise the hold whatever the average
     g_fs.gpu_on = gpu_on; g_fs.gpu = gpu;   // an idle GPU's late frames do not step up; a hold the GPU does not explain is probed (nvn_fstep.h)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
-    static double measured_sum;   // units (vsyncs, or ticks with t120) the game stepped beyond the host's steps
-    if (dm_fps_state && !fixed && __atomic_load_n((uint32_t *)(dm_fps_state + FSTEP_FDELTA_ON_OFF), __ATOMIC_RELAXED) && !dm_detclock_enabled()) {   // a main whose stub steps by the frame time when it is longer (state FSTEP_FDELTA_OFF; Ocarina of Time's patches.py)
-        static int on = -1; static nvn_fdelta fd;
-        if (on < 0) { const char *e = getenv("DM_FRAME_DELTA"); on = !e || strcmp(e, "0"); LOG("[nvn] game step from the measured frame time: %s", on ? "on" : "off (DM_FRAME_DELTA=0)"); }
-        if (on) {
-            const double ups = t120 ? 120.0 : 60.0;   // the step's units a second: the measured time is set against the step in the same unit
-            double vs = nvn_fstep_measured(&g_fs, nvn_fdelta_next(&fd, now_ns()) * ups); float s = (float)(vs / ups); uint32_t b; memcpy(&b, &s, sizeof b);
-            n = g_fs.step; if (vs > n) measured_sum += vs - n;
-            __atomic_store_n((uint32_t *)(dm_fps_state + FSTEP_FDELTA_OFF), b, __ATOMIC_RELAXED);
-        }
-    }
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
     int fine = g_fs.fine && c == 30 && !fps_high(), fine0 = atomic_exchange(&g_fs_fine, fine);   // only a 30 fps cap's link runs slower than the vsyncs
@@ -3277,7 +3266,7 @@ static void fstep_tick(const win_t *o, int c) {
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls, (unsigned long long)drain_n, drain_cut / v); memset(held, 0, sizeof held); drain_n = drain_cut = 0; }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
-        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum + (uint64_t)measured_sum, t = now_ns();   // the units stepped: vsyncs, or ticks with t120
+        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();   // the units stepped: vsyncs, or ticks with t120
         const double ups = t120 ? 120.0 : 60.0;
         char fn[96] = ""; if (kmax == 2 * kv && kmin == 2 * kv) snprintf(fn, sizeof fn, ", now %s (switched to the next vsync %llu× so far)", g_fs.fine ? "at the next vsync" : "on the 30 Hz link", (unsigned long long)g_fs.fines);
         if (t0 && t120) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 2 / 3 / 4 / 6 ticks of 1/120 s %llu / %llu / %llu / %llu frames, %llu late, %llu ticks paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks); cap %d fps, hold at most %d ticks of 1/120 s: %s%s",

@@ -49,20 +49,6 @@
 #include <stdint.h>
 #include <string.h>
 
-// Frame time for a game that steps by it (Ocarina of Time's patches.py): the mean of the last NVN_FDELTA_N present intervals in seconds, or 0 at the target rate. A stall counts at most
-// 0.1 s, so a load does not jump the game forward, and the result stops at 4 frames of 60 fps; under 1.01 frames (59.4 fps) it is the target rate. The band was 1.1, which left 55 to 59 fps, where a GPU-bound game sits, to whole-vsync steps; the mean of 8 intervals and the debt gate of nvn_fstep_measured keep a steady 60 at the game's own step without it
-#define NVN_FDELTA_N 8
-typedef struct { uint64_t last; double t[NVN_FDELTA_N]; int n, i; } nvn_fdelta;
-static inline float nvn_fdelta_next(nvn_fdelta *f, uint64_t now_ns) {
-    uint64_t was = f->last; f->last = now_ns;
-    if (!was) return 0;
-    double s = (double)(now_ns - was) / 1e9, sum = 0;
-    f->t[f->i] = s > 0.1 ? 0.1 : s; f->i = (f->i + 1) % NVN_FDELTA_N; if (f->n < NVN_FDELTA_N) f->n++;
-    for (int i = 0; i < f->n; i++) sum += f->t[i];
-    double mean = sum / f->n;
-    return mean * 60 < 1.01 ? 0.0f : (float)fmin(mean, 4.0 / 60);
-}
-
 #define FSTEP_MAX 3           // the largest step: both games' own interval logic uses 1–3 (BotW clamps to [2, 3], TOTK picks 2 or 3), so their integer readers never see 4
 #define FSTEP_LATE 0.1        // a frame is late when it or its GPU work took this many vsyncs (1.7 ms) more than k: 53 fps is not 60 (start-to-start jitter on time is well below)
 #define FSTEP_SHORT_MAX 2.0  // a frame counts at most this many vsyncs past its hold toward the average (a load's stall is one long frame, not a rate)
@@ -263,18 +249,6 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     return s->step;
 }
 
-// A game whose stub steps by the larger of the host's step and the measured frame time (vs, in vsyncs: nvn_fdelta_next; 0 = none). The measured time carries the time a late
-// frame lost over the frames after it, so no whole vsync is paid back beside it (both together ran the game ahead: a frame shown two vsyncs was paid back at once and again as
-// eight steps of 1.125), and the debt counts what the game stepped. The stub never steps less than the host's step, so the measured time is handed out only while the game is
-// behind: a late frame the pacing makes up with shorter ones lost no time, and its 1.125 ran the game 0.3 % fast (100 such frames in 1,800). While nothing is measured (under
-// 1.01 frames) the debt is paid back in whole vsyncs as without the stub. Called after nvn_fstep_next, whose step it corrects (s->step); returns the vsyncs to publish, 0 = none
-static inline double nvn_fstep_measured(nvn_fstep *s, double vs) {
-    if (vs <= 0 || s->debt <= 0) return 0;
-    if (s->step > s->k) { s->step = s->k; s->paid--; }
-    if (vs > s->step) s->debt -= vs - s->step;
-    return vs;
-}
-
 // The GPU clock follows the hold too: Breath of the Wild on an iPhone went from 14.4 to about 25 ms of GPU time a frame at hold 2 with the same 4,900 draws, the CPU still on its
 // performance cores, so its cost never fitted hold 1 again. The GPU counts as slowed (another reason for nvn_fstep_next's slow) when its time at a hold above kmin is at least
 // FSTEP_GPU_SLOW times its time at kmin and it alone does not fit kmin (a GPU at 3 ms of 17, 6 times its time on a loading screen, is not what holds a frame back). Fitting
@@ -348,10 +322,6 @@ static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, const nvn_fstep 
 // The frame step state page's target (+0 float fps, 0 = every stub runs the game's own instructions) and step unit (+0x38 u32: 120 = ticks of 1/120 s for FRAME_STEP_120 stubs,
 // 0 = vsyncs of 1/60 s; written by loader.c dm_fps_state_apply and fixed for the run)
 #define FSTEP_UNIT_OFF 0x38
-// The measured frame time for a stub that steps by it when it is longer (Ocarina of Time's frame ratio, PR #2259): +0xa0 float seconds (0 = at the target), written by the host
-// (hle_nvn.c fstep_tick); +0xa4 u32 set to 1 by the stub, so the host measures only for a main that reads it. Past the screen-shape fields (+0x48..+0x98, loader.c)
-#define FSTEP_FDELTA_OFF 0xa0
-#define FSTEP_FDELTA_ON_OFF 0xa4
 static inline float nvn_fstep_target(const uint8_t *page) { uint32_t b = __atomic_load_n((const uint32_t *)page, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t); return t; }
 static inline void nvn_fstep_target_put(uint8_t *page, float t) { uint32_t b; memcpy(&b, &t, sizeof b); __atomic_store_n((uint32_t *)page, b, __ATOMIC_RELAXED); }
 static inline int nvn_fstep_t120(const uint8_t *page) { return page && __atomic_load_n((const uint32_t *)(page + FSTEP_UNIT_OFF), __ATOMIC_RELAXED) == 120; }

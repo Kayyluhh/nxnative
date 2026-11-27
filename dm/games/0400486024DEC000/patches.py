@@ -8,16 +8,13 @@ from nso_asm import ADRP, B, BL
 # the unit the ticks a second the host counts the step in (state +0x38: 120, written by the loader for this stub, so 2 / 3 / 4 ticks are 60 / 40 / 30 fps; 0, a page nothing wrote
 # there, divides by 60: the division's value when the host keeps frames 60 / rate vsyncs), and counts the units stepped (+0x30). The ratio is a float, so 3 ticks (25 ms, 40 fps on a
 # 120 Hz screen) are a ratio of 1.5 at base 60 and 0.75 at base 30. Until the host has decided a step, and at fps_target 0, the division runs.
-# Below the target the frames are not whole vsyncs long (55-59.7 fps in the heavy areas of a GPU-bound Mac), so the stub then takes the larger of that ratio and base x the measured
-# frame time (state +0xa0, float seconds, 0 = at the target; hle_nvn.c fstep_tick, which pays back no whole step beside it). It marks state +0xa4 so the host measures only for a
-# main that reads the value (found by gunvalk, zortos293/Lichii PR #216; DM_FRAME_DELTA=0 leaves +0xa0 at 0). Both were +0x38 / +0x3c until the tick unit took +0x38.
 # s0 and x16 / x17 are free there (s0 is written again on every path before it is read; the function uses neither x16 nor x17); s1 keeps the base rate.
 # Lichii (a GPL emulator; only the fact was taken) found the division (its notes: main+0x6E6CC4, 60 / [x21+0x2C8])
-frame_ratio = (   # after the ADRP of the state page into x16; the ADRP into x17 after the first 7 words (the add has read x17 then); after word 14 the page's ADRP into x16 and frame_measured, then a B back to the site + 4, and after word 15
+frame_ratio = (   # after the ADRP of the state page into x16; the ADRP into x17 after the first 7 words (the add has read x17 then), a B back to the site + 4 after words 14 and 15
     0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
-    0x340002b1,   # cbz w17,orig (+21)
+    0x340001f1,   # cbz w17,orig (+15)
     0xb9402211,   # ldr w17,[x16,#0x20]    step
-    0x34000271,   # cbz w17,orig (+19)     not decided yet
+    0x340001b1,   # cbz w17,orig (+13)     not decided yet
     0x1e230220,   # ucvtf s0,w17
     0xf9401a10,   # ldr x16,[x16,#0x30]
     0x8b110210,   # add x16,x16,x17
@@ -29,12 +26,6 @@ frame_ratio = (   # after the ADRP of the state page into x16; the ADRP into x17
     0x1e230200,   # ucvtf s0,w16
     0x1e201908,   # fdiv s8,s8,s0          / the unit
     0x1e201828)   # orig: fdiv s8,s1,s0
-frame_measured = (   # after frame_ratio[:14] and the page's ADRP into x16 again: the measured frame time, when longer (PR #2259)
-    0xbd40a200,   # ldr s0,[x16,#0xa0]     seconds; 0 = at the target
-    0x52800031,   # mov w17,#1
-    0xb900a611,   # str w17,[x16,#0xa4]    this main reads the frame time
-    0x1e210800,   # fmul s0,s0,s1
-    0x1e204908)   # fmax s8,s8,s0          never below the host's step
 def frame_step(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
     site = base + 0xe4
@@ -43,11 +34,9 @@ def frame_step(ctx):
     for w in frame_ratio[:7]: emit(w)
     emit(ADRP(17, here(), FS_STATE_OFF))
     for w in frame_ratio[7:14]: emit(w)
-    emit(ADRP(16, here(), FS_STATE_OFF))   # the page again: x16 holds the unit now, and x17 did not survive a store on an iPhone (seedds/nxnative PR #1543, a fault at x17 + 0x3c with x17 = 0)
-    for w in frame_measured: emit(w)
     emit(B(here(), site + 4))
     emit(frame_ratio[14]); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
-    fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / its unit (state +0x38: 120 = ticks of 1/120 s, else 60), or base rate × the measured frame time when that is longer (state +0xa0), instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
+    fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / its unit (state +0x38: 120 = ticks of 1/120 s, else 60) instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     ctx.capabilities.add('FRAME_STEP_120')   # takes its step in ticks of 1/120 s: the loader writes 120 at +0x38, and 40 fps (3 ticks) is offered
     dynamic_resolution(ctx)
     render_scale(ctx)
@@ -526,9 +515,9 @@ BINDING = [
     {'what': 'movie frame: the pictures the player has taken', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own movie draw functions, found by their functions' fingerprints on any build that keeps them; it is the counter the same game's player keeps, so it goes with the player's two-picture cut and has no wider binding",
      'checked': 'v131072 main: one function with each fingerprint, each with one caller, the event update that reads the frame (vtable +0x78), the timeline and sound syncs and the player\'s +0xc read by disassembly; the opening timed with frames forced to two vsyncs (2026-11-16)'},
-    {'what': 'frame ratio from the host\'s step, or from the measured frame time when that is longer', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+    {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
-     'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08); the stub executed with and without a measured time (test_oot_real_speed.py, 2026-11-10); the stub in ticks of 1/120 s (state +0x38) run natively at 2 / 3 / 4 ticks and without a unit (test_frame_ratio_stub.py) and disassembled in the rewritten main (2026-11-14)'},
+     'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08); the stub in ticks of 1/120 s (state +0x38) run natively at 2 / 3 / 4 ticks and without a unit (test_frame_ratio_stub.py) and disassembled in the rewritten main (2026-11-14)'},
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09); 30 fps threshold scaling checked in test_ocarina_drs.py and in play at 30 fps on an M2 Air (PR #1954, 2026-11-16)'},
