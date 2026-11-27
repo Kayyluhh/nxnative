@@ -480,13 +480,6 @@
 - **Measured** on Skyward Sword HD, on an external drive, warm cache: 10,017 files to one: copy 3.72 s to 0.18 s, delete 0.40 s to 0.02 s, 150 MB to 131 MB on disk. Reading all 2,470 shaders' reflection and libraries 100 ms to 28 ms. The map must be `MAP_SHARED`: on a file this size a private mapping costs about 80 µs, against 0.9 µs. A cold read has not been measured, as the cache cannot be emptied without an administrator.
 - **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
 
-### Identical shader files repeated inside library images
-
-- **Symptom:** even a first shader build expands one compiled payload stored once in `cas-<chain>.db` into a separate full copy for every shader filename in `b-<chain>.img`. The temporary image grows by the same copies while the cache remains on disk.
-- **Cause:** `shader_lib.write` assigned a fresh data range to every name. The compile cache already shared identical bytes, and both the Python and native image readers already supported several names pointing at one range, but image publication lost that sharing.
-- **Fix:** `dm/tools/shader_lib.py` groups inputs by size and a content digest, compares their complete bytes before sharing a range, and preserves every filename and its contents. Paths are read in bounded chunks; a new payload takes two reads, and a changed input aborts publication. Duplicate payloads are not written even temporarily. The image format, shader contents, chain version and readers are unchanged. Full builds, partial updates and app subsets use the same writer. This reduces image payload storage; the compile cache, a previous image during replacement, unique payloads and index metadata still need space. Hashing and comparison cost CPU and input reads.
-- **Found on:** investigation of [Pokémon Pokopia's first-build disk growth, issue #1174](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game), reproduced with authored cache entries and the real staging and image writer. Pokopia's partial Mac library (chain `cf3be507e0eb`, 37,653 files), measured 2026-11-18: 4.97 → 3.65 GB with every file shared once (26.5%); its app subset, without the `.metal` sources, 1.60 → 1.25 GB, every file read back identical. The full-build peak is not measured.
-
 ### A Mac app packed with the library's image names it `b-<chain>.img.img`
 
 - **Symptom:** the Mac app logs `[RED] shader library …/Contents/Resources/msl/b-<chain> (a folder or a .img file) does not exist` and then `failed to load shader`. Its `msl/` holds `b-<chain>.img.img`, and its `Info.plist` records `DMChain` as `<chain>.img`.
