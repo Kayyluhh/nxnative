@@ -104,8 +104,6 @@ static int open_run(NSString *root) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(240);
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE"); setenv("DM_NVN_PREDICT", "0", 1);
-    // The checks here count the rows their lists name; warm-cs, the fixture map's compute shader, would join every list as one no list names (t_pso_warm checks that)
-    setenv("DM_PSO_ALL_COMPUTE", "0", 1);
     if (argc >= 3 && !strcmp(argv[1], "--tool")) {   // DM_PSO_PREBUILD=tool, the flush period as small as a test can make it
         if (getenv("T_PERIOD")) g_arch_period_max = atoi(getenv("T_PERIOD"));
         // T_HARVEST_HOLD=<ms>: the harvest queue (arch_harvest) busy that long, as a slow capture of a compute pipeline the MTLDevice built makes it
