@@ -3388,7 +3388,10 @@ static void fstep_tick(const win_t *o, int c) {
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(), lr = mtl_link_rate(); g_fs.shown_slack = hz > lr && hz % lr && mtl_link_active() ? (double)fstep_hz() / hz : 0;
-    int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, &g_fs, kmin) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
+    int gok = dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
+    int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, &g_fs, kmin) && gok;
+    // A scene that the failed probes' ratio says does not fit kmin may fit a hold between: a probe goes there when nothing calls for kmin (nvn_fgpu_between), under the same gates
+    int gto = gok ? nvn_fgpu_between(&g_fg, &g_fs) : 0;
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
     // Lateness is then what the screen shows: the on-screen interval of the frame 8 presents back against its hold (pres_expect_ms), late by a quarter or dropped
@@ -3410,6 +3413,7 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.smax = dm_fps_step_max;   // the stub's largest step (Mario Kart World: 2): frames held longer than the game steps would play in slow motion
     g_fs.no_payback = fps_high();   // at 120 fps a game may step by its target, not by the step: a late frame is slow motion there, so three raise the hold whatever the average (while fps_hold allows it, fstep_kmax)
     g_fs.gpu_on = gpu_on; g_fs.gpu = gpu;   // an idle GPU's late frames do not step up; a hold the GPU does not explain is probed (nvn_fstep.h)
+    g_fs.gpu_to = gto;
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
@@ -3434,7 +3438,8 @@ static void fstep_tick(const win_t *o, int c) {
         if (w >= (int)sizeof why) w = sizeof why - 1;
         if (nvn_fstep_same(&g_fs)) w += snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
         if (w >= (int)sizeof why) w = sizeof why - 1;   // snprintf returns the length it would have written
-        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
+        if (g_fs.uprobe == 1) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
+        else if (g_fs.uprobe == 2 && gr > 0) snprintf(why + w, sizeof why - w, ", GPU %.2f at hold %d, %.2f at hold %d by the failed probes, which fits hold %d", g_fg.cur, g_fg.k, g_fg.cur / gr, kmin, g_fs.k);
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() || t120 ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
             fixed ? "the game's own step" : kmin0 == FSTEP_OWN ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
@@ -3445,7 +3450,7 @@ static void fstep_tick(const win_t *o, int c) {
         LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores%s)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, gm, ++nlog == 40 ? "; further changes only counted below" : "");
     }
     else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && nlog < 40)
-        LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");
+        LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", k0, FSTEP_HOLD_MAX / 60, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls, (unsigned long long)drain_n, drain_cut / v); memset(held, 0, sizeof held); drain_n = drain_cut = 0; }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
@@ -3613,7 +3618,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
                        (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
-        uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
+        uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); }
+        // How long the frame's first command buffer stood on the queue behind earlier work (a present's drawable wait among it)
+        if (frame_rec()) { double q = mtl_gpu_queue_ms(f - 8); if (q >= 0) trow(f - 8, "@gpu_q_ms", q); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);
@@ -3649,6 +3656,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         { double iv_ = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0); mtl_ub_present(iv_); }   // same-process alternating measurement (DM_NVN_UB) tallies on-screen present intervals per phase; when off it is just one atomic read
         dm_perf_present(a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0));   // on-screen present intervals are also kept in a separate ring; tsummary reports dropped frames every 300 frames (M1 criterion)
         if (a_ > 0) trow(f - 8, "@pres_at_ms", a_ * 1e3 - g_t0_ns / 1e6);   // on-screen present time (ms since process start; presentedTime shares a time base with mach_absolute_time)
+        { double q; if (frame_rec() && mtl_present_queue_ms(n, &q)) trow(f - 8, "@pres_q_ms", q); }   // from the present's commit to its command buffer's GPU start
         // The display-link tick that took this frame: its target display time (same base as @pres_at_ms, so @pres_at_ms − @link_target_ms is how late the system showed it), the callback's lead
         // before that target, the callbacks since the previous frame's (1 = every tick took a frame) and the longest interval between them (33 ms on a 60 Hz link = a refresh the link skipped)
         double lt, ll, lg; int lk;

@@ -67,6 +67,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [BALL x PIT](010086A022444000/README.md) | `010086A022444000` | 1.293 | 20.5.19 | Unity 6000.0.62f1 IL2CPP | NVN | — |
 | [Balatro](0100CD801CE5E000/README.md) | `0100CD801CE5E000` | 1.1.3 | 18.3.2 | LÖVE 11.4 (love-nx, LuaJIT, SDL) | OpenGL | — |
 | [Bastion](010038600B27E000/README.md) | `010038600B27E000` | 1.0.0 (base) | 5.4.0 | Supergiant Games' engine on MonoGame 3.0 | NVN | — |
+| [Batman: Arkham Asylum](0100E870163CA000/README.md) | `0100E870163CA000` | 1.0.1 (provisional Mac profile) | 14.3.0 | Unreal Engine 3 (Rocksteady), FMOD, Scaleform, Bink | NVN | — |
 | [Batman: Arkham Knight](0100ACD0163D0000/README.md) | `0100ACD0163D0000` | 1.0.5 | 14.3.0 | Unreal Engine 3 (Rocksteady), Wwise | NVN | — |
 | [Bayonetta](010076F0049A2000/README.md) | `010076F0049A2000` | 1.1 | 3.6.0 | PlatinumGames' engine (Wii U form) | NVN | — |
 | [Bayonetta 2](01007960049A0000/README.md) | `01007960049A0000` | 1.2 | 3.6.0 | PlatinumGames' engine (Wii U form) | NVN | — |
@@ -158,6 +159,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN | — |
 | [L.A. Noire](0100830004FB6000/README.md) | `0100830004FB6000` | 1.2 | 1.3.1 | Team Bondi's engine (Havok, FMOD) | NVN | — |
 | [LEGO Star Wars: The Skywalker Saga](010042D00D900000/README.md) | `010042D00D900000` | 1.10.0 | 12.3.6 | Traveller's Tales' engine | NVN | 60 fps target |
+| [Love Is All Around 2](0100D2C024D06000/README.md) | `0100D2C024D06000` | 1.16.0.223 (provisional Mac profile) | 19.3.14 | Unity 2022.3.62f1 IL2CPP, FMOD | NVN | — |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN | 60 fps target |
 | [Mario & Luigi: Brothership](01006D0017F7A000/README.md) | `01006D0017F7A000` | 1.0.0 | 12.3.2 | Unreal Engine 4.27.2, Wwise | NVN | 60 fps target, [120 fps option](01006D0017F7A000/README.md#frame-rate) |
 | [Mario Golf: Super Rush](0100C9C00E25C000/README.md) | `0100C9C00E25C000` | 4.0.0 | 11.4.0 | Camelot's engine, NintendoWare | NVN | — |
@@ -254,6 +256,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [SteamWorld Heist: Ultimate Edition](010016100A186000/README.md) | `010016100A186000` | 2.2.1 | 4.5.0 | Image & Form's own engine (SteamWorld) | NVN | — |
 | [stitch.](010025801CEA8000/README.md) | `010025801CEA8000` | 1.2 | 21.4.4 | Unity 6000.0.68f1 IL2CPP, FMOD | NVN | [60 fps target](010025801CEA8000/README.md#frame-rate) |
 | [STORY OF SEASONS: Friends of Mineral Town](0100ED400EEC2000/README.md) | `0100ED400EEC2000` | 1.0.5 | 8.2.0 | — | NVN | — |
+| [Stray](010075101EF84000/README.md) | `010075101EF84000` | 1.6.0 | 17.5.6 | Unreal Engine 4.27.2, Bink | NVN | [60 fps target](010075101EF84000/README.md#frame-rate) |
 | [Streets of Rage 4](0100EC9010258000/README.md) | `0100EC9010258000` | 1.0.9 | 9.3.1 | MonoGame (C# → C++ by BRUTE) | NVN | — |
 | [Subnautica](0100429011144000/README.md) | `0100429011144000` | 1.23.83358 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |
 | [Subnautica: Below Zero](010014C011146000/README.md) | `010014C011146000` | 1.23.55063 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |
